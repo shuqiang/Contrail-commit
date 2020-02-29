@@ -3,6 +3,8 @@ From: Shuqiang Zhao <shuqiang.zhao.nj@gmail.com>
 Date: Fri, 09 Aug 2019 16:51:43 +0800
 Subject: [PATCH] Fix tsn agent crash in FlowStatsManager::SetProfileData
 
+OpenContrail 3.2
+
 Issue
 -----
 The agent pointer in FlowStatsManager is pointing to different memory location, causing agent crash.
