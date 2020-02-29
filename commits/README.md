@@ -18,5 +18,4 @@ commit later
 
 ## vgw:
 
-commit later
-
+make vgw interface works on dpdk mode
