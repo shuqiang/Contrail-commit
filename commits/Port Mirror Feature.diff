@@ -1,1 +1,138 @@
 Port Mirror Feature
+
+OpenContrail 3.2
+
+commit 304b2386aa7f2436c43ef19df63c313dc86bcca8
+Author: zhaosq <shuqiang.zhao.nj@gmail.com>
+Date:   Fri Dec 15 16:36:20 2017 +0800
+
+
+diff --git a/dp-core/vr_nexthop.c b/dp-core/vr_nexthop.c
+old mode 100644
+new mode 100755
+index dc650b4..551721d
+--- a/dp-core/vr_nexthop.c
++++ b/dp-core/vr_nexthop.c
+@@ -9,6 +9,7 @@
+ #include <vr_interface.h>
+ #include <vr_nexthop.h>
+ #include <vr_vxlan.h>
++#include <vr_mirror.h>
+
+ #include "vr_message.h"
+ #include "vr_sandesh.h"
+
+
+@@ -1937,6 +2034,14 @@ nh_encap_l2(struct vr_packet *pkt, struct vr_nexthop *nh,
+     if (stats)
+         stats->vrf_l2_encaps++;
+
++    // egress port mirror, the TX direction
++    struct vr_forwarding_md m_fmd;
++    if (vif_is_virtual(vif) && (vif->vif_flags & VIF_FLAG_MIRROR_TX)) {
++        if (vif_is_vlan(vif) ||
++               ((!vif_is_vlan(vif)) && (vif->vif_idx == pkt->vp_if->vif_idx))) {
++            vr_init_forwarding_md(&m_fmd);
++            m_fmd.fmd_dvrf = vif->vif_vrf;
++            vr_mirror(vif->vif_router, vif->vif_mirror_id, pkt, &m_fmd);   
++    }
++
+
+     vif->vif_tx(vif, pkt, fmd);
+
+     return 0;
+
+diff --git a/dp-core/vr_proto_ip.c b/dp-core/vr_proto_ip.c
+old mode 100644
+new mode 100755
+index 2aeb5e6..7e087f7
+--- a/dp-core/vr_proto_ip.c
++++ b/dp-core/vr_proto_ip.c
+@@ -6,6 +6,7 @@
+ #include <vr_os.h>
+ #include <vr_types.h>
+ #include <vr_packet.h>
++#include <vr_mirror.h>
+
+ #include "vr_interface.h"
+ #include "vr_datapath.h"
+@@ -226,6 +221,8 @@ vr_forward(struct vrouter *router, struct vr_packet *pkt,
+     int family;
+     unsigned char ttl;
+     uint32_t rt_prefix[4];
++    bool pkt_mirrored = false;
++    struct vr_udp *udp;
+
+     struct vr_route_req rt;
+     struct vr_nexthop *nh;
+@@ -250,6 +247,11 @@ vr_forward(struct vrouter *router, struct vr_packet *pkt,
+
+         ttl = vr_ip_decrement_ttl(ip);
+         pkt->vp_type = VP_TYPE_IP;
++        // check if mirrored pkt
++        udp = (struct vr_udp *)((unsigned char *)ip + ip->ip_hl * 4);
++        if (udp->udp_sport == htons(VR_MIRROR_UDP_SRC_PORT) && udp->udp_dport == htons(VR_MIRROR_UDP_DST_PORT)) {
++            pkt_mirrored = true;
++        }
+     } else {
+         vr_pfree(pkt, VP_DROP_INVALID_PROTOCOL);
+         return 0;
+@@ -274,6 +276,41 @@ vr_forward(struct vrouter *router, struct vr_packet *pkt,
+     rt.rtr_req.rtr_marker_size = 0;
+
+     nh = vr_inet_route_lookup(fmd->fmd_dvrf, &rt);
++
++    // get l3 rt first, using index to lookup l2 rt
++    if (nh->nh_flags & NH_FLAG_TUNNEL_VXLAN) {
++        // using for vxlan l2 rt
++        struct vr_nexthop *nh_l2;
++        struct vr_route_req tmp_req;
++        struct vr_eth *eth;
++        struct vr_eth *inner_eth;
++        char mac[] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
++
++        tmp_req.rtr_req.rtr_index = rt.rtr_req.rtr_index;
++        tmp_req.rtr_req.rtr_label_flags = 0;
++        tmp_req.rtr_req.rtr_mac_size = VR_ETHER_ALEN;
++        tmp_req.rtr_req.rtr_mac = (int8_t *)mac;
++        tmp_req.rtr_req.rtr_vrf_id = fmd->fmd_dvrf;
++
++        if (rt.rtr_req.rtr_index != VR_BE_INVALID_INDEX) {
++            nh_l2 = vr_bridge_lookup(fmd->fmd_dvrf, &tmp_req);
++            if (nh_l2 && nh_l2->nh_type == NH_TUNNEL) {
++                fmd->fmd_label = tmp_req.rtr_req.rtr_label;
++                eth = (struct vr_eth *)(pkt_data(pkt) - VR_ETHER_HLEN);
++                VR_MAC_COPY(eth->eth_dmac, tmp_req.rtr_req.rtr_mac);
++                // mirrored pkt
++                if (pkt_mirrored) {
++                    // net mirror: IP + UDP + JVNI = 20 + 8 + 146 = 174
++                    // port mirror: IP + UDP + "ff:00" = 20 + 8 + 2 = 30
++                    inner_eth = (struct vr_eth *)(pkt_data(pkt) + 30);
++                    VR_MAC_COPY(eth->eth_smac, inner_eth->eth_smac);
++                    eth->eth_proto = htons(VR_ETH_PROTO_IP);
++                }
++                return nh_output(pkt, nh_l2, fmd);
++            }
++        }
++    }
++
+     if (rt.rtr_req.rtr_label_flags & VR_RT_LABEL_VALID_FLAG) {
+         if (!fmd) {
+             vr_init_forwarding_md(&rt_fmd);
+@@ -496,18 +533,22 @@ int
+
+
+diff --git a/include/vr_mirror.h b/include/vr_mirror.h
+index a00366e..ddcd7ed 100644
+--- a/include/vr_mirror.h
++++ b/include/vr_mirror.h
+@@ -10,6 +10,9 @@
+ #define VR_MIRROR_MME 0x1
+ #define VR_MIRROR_PCAP 0x2
+
++#define VR_MIRROR_UDP_DST_PORT 8099
++#define VR_MIRROR_UDP_SRC_PORT 8097
++
+ struct vrouter;
+ struct vr_packet;
+
