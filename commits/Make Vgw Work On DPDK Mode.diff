@@ -3,6 +3,8 @@ Date:   Wed Jul 27 17:34:36 2016 +0800
     make vgw interface works on dpdk mode
 
     Change-Id: Ia3b62bd894a163619e45f9958b11fa4547ec1bed
+
+OpenContrail3.2
     
 diff --git a/dp-core/vr_interface.c b/dp-core/vr_interface.c
 index 0f485e0..1ba3b77 100644
