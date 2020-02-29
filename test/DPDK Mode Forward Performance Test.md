@@ -3,10 +3,7 @@
 ## Overview                                 
 	OpenContrail support DPDK mode since version 2.2. This report is base on DPDK mode, and the tunnel type is MPLS Over UDP.
 
-   
-1.2测试环境
 
-2.1测试环境及组网图
 
 
 
