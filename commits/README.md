@@ -19,3 +19,5 @@ commit later
 ## vgw:
 
 make vgw interface works on dpdk mode
+* [make vgw interface works on dpdk mode](Solution-Contrail-Fabric-Management/Contrail-Fabric-Management.md#toc)
+
