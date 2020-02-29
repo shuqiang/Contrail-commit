@@ -1,33 +1,7 @@
 
-OpenContrail With DPDK
-转发性能测试报告
-                                  
-1.0.0	初稿	2016-09-30	赵树强
-			
-
-
-目　录
-
-
-1 引言	5
-2 测试环境	5
-2.1 测试环境及组网图	5
-2.2 硬件	5
-3 测试版本信息	5
-4 测试工具	6
-5 测试方法	6
-5.1 BIOS设置	6
-5.2 Hugepage 设置	6
-5.3 Coremask设置	6
-5.4 Contrail-Vrouter 设置	7
-5.5 虚拟机信息	7
-5.6 Pktgen脚本设置	7
-6 测试结果	9
-6.1 单向打流VM1-->VM2	9
-6.2 双向打流VM1<-->VM2	9
-6.3 两对双向打流VM1<-->VM2，VM3<-->VM4	9
-1引言
-	OpenContrail支持DPDK模式的转发，需要调研DPDK模式下转发性能。该测试报告是针对OpenContrail 在DPDK模式下基于MPLS Over UDP系统的转发性能测试。
+# DPDK Mode Forward Performance Test Report
+## Overview                                 
+	OpenContrail support DPDK mode since version 2.2. This report is base on DPDK mode, and the tunnel type is MPLS Over UDP.
 
    
 1.2测试环境
