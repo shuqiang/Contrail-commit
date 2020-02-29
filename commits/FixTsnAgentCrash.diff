@@ -1,0 +1,33 @@
+From 0a0b5d41ff79fd2adbf6b0d0f082d374fc5f89df Mon Sep 17 00:00:00 2001
+From: Shuqiang Zhao <shuqiang.zhao.nj@gmail.com>
+Date: Fri, 09 Aug 2019 16:51:43 +0800
+Subject: [PATCH] Fix tsn agent crash in FlowStatsManager::SetProfileData
+
+Issue
+-----
+The agent pointer in FlowStatsManager is pointing to different memory location, causing agent crash.
+In TSN mode, agent does not create FlowStatsManager/FlowStatsCollector.
+
+Fix
+---
+In TSN mode, we don't register FlowStatscb.
+
+Closes-Bug: #1659945
+Change-Id: Id9e52abb543553d749094a95c478577419ed3514
+---
+
+diff --git a/src/vnsw/agent/vrouter/flow_stats/flow_stats_manager.cc b/src/vnsw/agent/vrouter/flow_stats/flow_stats_manager.cc
+index cebf80a..368fa82 100644
+--- a/src/vnsw/agent/vrouter/flow_stats/flow_stats_manager.cc
++++ b/src/vnsw/agent/vrouter/flow_stats/flow_stats_manager.cc
+@@ -347,6 +347,10 @@
+ }
+ 
+ void FlowStatsManager::InitDone() {
++    if (agent_->tsn_enabled()) {
++        /* In TSN mode, we don't register FlowStatscb */
++        return;
++    }
+     AgentProfile *profile = agent_->oper_db()->agent_profile();
+     profile->RegisterFlowStatsCb(boost::bind(&FlowStatsManager::SetProfileData,
+                                              this, _1));
