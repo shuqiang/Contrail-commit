@@ -1,0 +1,36 @@
+Date:   Wed Jul 27 17:34:36 2016 +0800
+
+    make vgw interface works on dpdk mode
+
+    Change-Id: Ia3b62bd894a163619e45f9958b11fa4547ec1bed
+    
+diff --git a/dp-core/vr_interface.c b/dp-core/vr_interface.c
+index 0f485e0..1ba3b77 100644
+--- a/dp-core/vr_interface.c
++++ b/dp-core/vr_interface.c
+@@ -676,6 +676,12 @@ vhost_tx(struct vr_interface *vif, struct vr_packet *pkt,
+             else
+                 eth_hdr->eth_proto = htons(VR_ETH_PROTO_IP);
+         }
++    } else {
++        // add for vgw
++        if (vif_is_virtual(pkt->vp_if)) {
++            eth_hdr = (struct vr_eth *)pkt_data(pkt);
++            memcpy(eth_hdr->eth_smac, vif->vif_mac, VR_ETHER_ALEN);
++        }
+     }
+
+     ret = hif_ops->hif_rx(vif, pkt);
+
+diff --git a/dpdk/vr_dpdk_interface.c b/dpdk/vr_dpdk_interface.c
+index bff2bb8..8ee92b5 100644
+--- a/dpdk/vr_dpdk_interface.c
++++ b/dpdk/vr_dpdk_interface.c
+@@ -557,6 +557,7 @@ dpdk_vhost_if_add(struct vr_interface *vif)
+     if(vif->vif_type == VIF_TYPE_GATEWAY)
+     {
+         port_id = 99;
++        memcpy(vif->vif_mac, "\x00\x00\x5e\x00\x01\x00", ETHER_ADDR_LEN);
+     }
+     else
+     {
