@@ -14,10 +14,10 @@ commit later
 
 ## mirror:
 
-[Port Mirror Feature](commits/Port Mirror Feature.diff)
+* [Port Mirror Feature](https://github.com/shuqiang/OpenContrail/blob/master/commits/Port%20Mirror%20Feature.diff)
 
 ## vgw:
 
-make vgw interface works on dpdk mode
+
 * [make vgw interface works on dpdk mode](https://github.com/shuqiang/OpenContrail/blob/master/commits/Make%20Vgw%20Work%20On%20DPDK%20Mode.diff)
 
