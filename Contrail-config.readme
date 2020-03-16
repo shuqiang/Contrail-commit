@@ -16,9 +16,9 @@ The below gives overview of different modules invovlved
    |    +----------------------+         +-------------v------------+         |         +-------------+
    |    | VirtualNetworkServer |<------->|         http/rest        |<----------------->|  REST API   |
    |    +-----------^----------+         +--------------------------+         |         +-------------+
-   |       ip alloc |                                                         |
+   |       ip_alloc |                                                         |
    |                |                                                         |
-   |                | ip alloc req                                            |
+   |                | ip_alloc_req                                            |
    |    +-----------v----------+                                              |
    |    |       AddrMgmt       |                                              |
    |    +----------------------+                                              |
