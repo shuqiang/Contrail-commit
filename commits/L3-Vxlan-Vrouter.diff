@@ -1,0 +1,128 @@
+commit 304b2386aa7f2436c43ef19df63c313dc86bcca8
+Author: shuqiang <shuqiang.zhao.nj@gmail.com>
+Date:   Fri Dec 15 16:36:20 2017 +0800
+replace l3 rt by l2 rt for vxlan tunnel;
+Change-Id: Idd1b620a7ce8b844b695bf3391f665c3633fb7d4
+ 
+ 
+diff --git a/dp-core/vr_nexthop.c b/dp-core/vr_nexthop.c
+old mode 100644
+new mode 100755
+index dc650b4..551721d
+--- a/dp-core/vr_nexthop.c
++++ b/dp-core/vr_nexthop.c
+@@ -9,6 +9,7 @@
+ #include <vr_interface.h>
+ #include <vr_nexthop.h>
+ #include <vr_vxlan.h>
+ 
+ #include "vr_message.h"
+ #include "vr_sandesh.h"
+ 
+@@ -496,12 +513,28 @@ nh_vxlan_tunnel_helper(struct vr_packet *pkt, struct vr_forwarding_md *fmd,
+ 
+     /*
+      * The UDP source port is a hash of the inner headers
+-     */
++     *
+     if ((!fmd->fmd_udp_src_port) && vr_get_udp_src_port) {
+         udp_src_port = vr_get_udp_src_port(pkt, fmd, fmd->fmd_dvrf);
+         if (udp_src_port == 0) {
+          return false;
+         }
+     }
+ 
+     vr_forwarding_md_update_label_type(fmd, VR_LABEL_TYPE_VXLAN_ID);
+@@ -1011,6 +1045,7 @@ nh_composite_encap(struct vr_packet *pkt, struct vr_nexthop *nh,
+     struct vr_nexthop *dir_nh;
+     unsigned short drop_reason;
+     struct vr_packet *new_pkt;
+ 
+     drop_reason = VP_DROP_CLONED_ORIGINAL;
+     stats = vr_inet_vrf_stats(fmd->fmd_dvrf, pkt->vp_cpu);
+@@ -1039,7 +1074,22 @@ nh_composite_encap(struct vr_packet *pkt, struct vr_nexthop *nh,
+             break;
+         }
+         fmd->fmd_dvrf = dir_nh->nh_dev->vif_vrf;
++
++        /* Add pkt type before encap_l2 */
++        if (vr_pkt_type(new_pkt, 0, fmd) < 0) {
++            drop_reason = VP_DROP_INVALID_PACKET;
++            goto drop;
++        }
++
+         nh_output(new_pkt, dir_nh, fmd);
+     }
+ 
+     /* Original packet needs to be unconditionally dropped */
+@@ -1234,8 +1284,8 @@ nh_composite_fabric(struct vr_packet *pkt, struct vr_nexthop *nh,
+             sip = dir_nh->nh_udp_tun_sip;
+             dip = dir_nh->nh_udp_tun_dip;
+         } else {
+-            drop_reason = VP_DROP_INVALID_NH;
+-            break;
++            sip = dir_nh->nh_udp_tun_sip;
++            dip = dir_nh->nh_udp_tun_dip;
+         }
+ 
+         /* Dont forward to same source */
+@@ -1271,7 +1321,8 @@ nh_composite_fabric(struct vr_packet *pkt, struct vr_nexthop *nh,
+              */
+             vr_forwarding_md_set_label(fmd, label, VR_LABEL_TYPE_UNKNOWN);
+             fmd->fmd_dvrf = dir_nh->nh_dev->vif_vrf;
+-            if (nh_vxlan_tunnel_helper(new_pkt, fmd, sip, sip) == false) {
++            if (nh_vxlan_tunnel_helper(nh->nh_router, new_pkt,
++                        fmd, sip, sip) == false) {
+                 vr_pfree(new_pkt, VP_DROP_PUSH);
+                 break;
+             }
+ 
+@@ -1473,8 +1531,17 @@ nh_vxlan_tunnel(struct vr_packet *pkt, struct vr_nexthop *nh,
+         }
+     }
+ 
+-    if (nh_vxlan_tunnel_helper(pkt, fmd, nh->nh_udp_tun_sip,
+-                                            nh->nh_udp_tun_dip) == false)
++    struct vr_eth *eth;
++    eth = (struct vr_eth *)pkt_data(pkt);
++    if (eth) {
++        if ((ntohs(eth->eth_proto) != VR_ETH_PROTO_IP ) && !(pkt->vp_flags & VP_FLAG_MULTICAST) && ((pkt->vp_type != VP_TYPE_ARP) && (pkt->vp_type != VP_TYPE_UNKNOWN))){
++            if (!pkt_push(pkt, VR_ETHER_HLEN)) {
++                goto send_fail;
++            }
++        }
++    }
++    if (nh_vxlan_tunnel_helper(nh->nh_router, pkt, fmd, nh->nh_udp_tun_sip,
++                nh->nh_udp_tun_dip) == false)
+         goto send_fail;
+ 
+ 
+@@ -1613,7 +1682,8 @@ nh_mpls_udp_tunnel(struct vr_packet *pkt, struct vr_nexthop *nh,
+         pkt = tmp_pkt;
+     }
+ 
+ 
+
+diff --git a/linux/vrouter_mod.c b/linux/vrouter_mod.c
+old mode 100644
+new mode 100755
+index 627eec3..6d6ab17
+--- a/linux/vrouter_mod.c
++++ b/linux/vrouter_mod.c
+@@ -685,7 +685,7 @@ lh_get_udp_src_port(struct vr_packet *pkt, struct vr_forwarding_md *fmd,
+         }
+ 
+         if (fmd && fmd->fmd_flow_index >= 0) {
+             if (fentry) {
+                 lh_reset_skb_fields(pkt);
+                 return fentry->fe_udp_src_port;
+@@ -1907,7 +1907,8 @@ lh_pull_inner_headers(struct vr_packet *pkt,
+          if (!skb_csum_unnecessary(skb)) {
+              outer_iph = (struct vr_ip *)pkt_network_header(pkt);
+              if (outer_iph && (outer_iph->ip_proto == VR_IP_PROTO_UDP) &&
+-                 udph_cksum) {
++                 //udph_cksum) {
++                 udph_cksum && mpls_pkt) {
+                  skb_pull_len = pkt_data(pkt) - skb->data;
+ 
+                  skb_pull(skb, skb_pull_len);

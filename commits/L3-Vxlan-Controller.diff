@@ -1,0 +1,1041 @@
+commit 6a13ba9c7a4ce65e8e38d57de5a1bd50432d7d4d
+Author: shuqiang <shuqiang.zhao.nj@gmail.com>
+Date:   Thu Apr 20 20:11:20 2017 +0800
+
+    aggregate l2 evpn route in controller node for the l3 vxlan feature
+    
+    Change-Id: I99f39d3c0e844bea63a1819468047383852ab65d
+
+diff --git a/src/bgp/evpn/evpn_route.h b/src/bgp/evpn/evpn_route.h
+index 780218b78..e32928a35 100644
+--- a/src/bgp/evpn/evpn_route.h
++++ b/src/bgp/evpn/evpn_route.h
+@@ -76,6 +76,8 @@ public:
+     const RouteDistinguisher &route_distinguisher() const { return rd_; }
+     const EthernetSegmentId &esi() const { return esi_; }
+     uint32_t tag() const { return tag_; }
++    //void set_tag(uint32_t tag) { tag_ = tag; }
++    void set_IpAddress(IpAddress ip) { ip_address_ = ip; }
+     const MacAddress &mac_addr() const { return mac_addr_; }
+     Address::Family family() const { return family_; }
+     IpAddress ip_address() const { return ip_address_; }
+diff --git a/src/bgp/evpn/evpn_table.cc b/src/bgp/evpn/evpn_table.cc
+index 9ae899231..2ed5ae40e 100644
+--- a/src/bgp/evpn/evpn_table.cc
++++ b/src/bgp/evpn/evpn_table.cc
+@@ -118,15 +118,17 @@ BgpRoute *EvpnTable::RouteReplicate(BgpServer *server,
+ 
+     if (!IsMaster()) {
+         // Don't replicate to a VRF from other VRF tables.
+-        EvpnTable *src_evpn_table = dynamic_cast<EvpnTable *>(src_table);
++        /*EvpnTable *src_evpn_table = dynamic_cast<EvpnTable *>(src_table);
+         if (!src_evpn_table->IsMaster())
+-            return NULL;
++            return NULL;*/
+ 
+         // Don't replicate to VRF from the VPN table if OriginVn doesn't match.
+         OriginVn origin_vn(server->autonomous_system(),
+             routing_instance()->virtual_network_index());
+         if (!community->ContainsOriginVn(origin_vn.GetExtCommunity()))
+-            return NULL;
++            //return NULL;
++            if (src_path->GetSourceString(true) == "Local")
++                return NULL;
+     }
+ 
+     EvpnRoute *evpn_rt = dynamic_cast<EvpnRoute *>(src_rt);
+@@ -140,6 +142,8 @@ BgpRoute *EvpnTable::RouteReplicate(BgpServer *server,
+         evpn_prefix.mac_addr().IsBroadcast())
+         return NULL;
+ 
++    //int vxlan_label_tag_id = routing_instance()->virtual_network_index();
++
+     BgpAttrDB *attr_db = server->attr_db();
+     BgpAttrPtr new_attr(src_path->GetAttr());
+ 
+@@ -154,6 +158,7 @@ BgpRoute *EvpnTable::RouteReplicate(BgpServer *server,
+     } else {
+         if (evpn_prefix.type() == EvpnPrefix::MacAdvertisementRoute)
+             evpn_prefix.set_route_distinguisher(RouteDistinguisher::kZeroRd);
++            //evpn_prefix.set_tag(vxlan_label_tag_id);
+     }
+     EvpnRoute rt_key(evpn_prefix);
+ 
+@@ -191,6 +196,7 @@ BgpRoute *EvpnTable::RouteReplicate(BgpServer *server,
+         new BgpSecondaryPath(src_path->GetPeer(), src_path->GetPathId(),
+                              src_path->GetSource(), new_attr,
+                              src_path->GetFlags(), src_path->GetLabel());
++                             //src_path->GetFlags(), vxlan_label_tag_id);
+     replicated_path->SetReplicateInfo(src_table, src_rt);
+     dest_route->InsertPath(replicated_path);
+ 
+commit a74c0a6942c7e8cfb10c1f0a6e1e5afab0aba7ca
+Author: shuqiang <shuqiang.zhao.nj@gmail.com>
+Date:   Tue Apr 25 16:12:29 2017 +0800
+
+    vrouter l3vxlan
+    
+    Change-Id: I7f20145e84496afa16816fcfe14176cc92278c0b
+
+diff --git a/src/vnsw/agent/controller/controller_export.cc b/src/vnsw/agent/controller/controller_export.cc
+old mode 100644
+new mode 100755
+index 0874a9f18..eccf2f406
+--- a/src/vnsw/agent/controller/controller_export.cc
++++ b/src/vnsw/agent/controller/controller_export.cc
+@@ -21,7 +21,7 @@
+ 
+ RouteExport::State::State() : 
+     DBState(), exported_(false), fabric_multicast_exported_(false),
+-    force_chg_(false), label_(MplsTable::kInvalidLabel), vn_(), sg_list_(),
++    force_chg_(false), label_(MplsTable::kInvalidLabel), vxlanid_(VxLanTable::kInvalidvxlan_id), vn_(), sg_list_(),
+     tunnel_type_(TunnelType::INVALID), path_preference_(),
+     destination_(), source_(), ecmp_load_balance_() {
+ }
+@@ -33,12 +33,22 @@ bool RouteExport::State::Changed(const AgentRoute *route, const AgentPath *path)
+     if (force_chg_ == true)
+         return true;
+ 
+-    if (label_ != path->GetActiveLabel())
++    if (label_ != path->GetL3ActiveLabel())
+         return true;
+ 
+     if (tunnel_type_ != path->tunnel_type()) {
+         return true;
+-    };
++    }
++
++    if (vxlanid_!= path->GetActiveLabel()) {
++        return true;
++    }
++
++    if (route->GetTableType() == Agent::INET4_UNICAST) {
++        if (mac_address_ != path->GetLocalInterMac()){
++            return true;
++        }
++    }
+ 
+     if (vn_ != path->dest_vn_name())
+         return true;
+@@ -58,9 +68,23 @@ bool RouteExport::State::Changed(const AgentRoute *route, const AgentPath *path)
+     return false;
+ }
+ 
+-void RouteExport::State::Update(const AgentRoute *route, const AgentPath *path) {
++void RouteExport::State::Update(const AgentRoute *route, const AgentPath *path, Agent::RouteTableType type) {
+     force_chg_ = false;
+-    label_ = path->GetActiveLabel();
++    AgentPath *local_port_path = NULL;
++    //mac_address_ = kDefInnerDstMac;
++    mac_address_ = "ff:ff:ff:ff:ff:ff";
++
++    if ( type == Agent::INET4_UNICAST) {
++        label_ = path->GetL3ActiveLabel();
++        local_port_path = route->FindLocalVmPortPathForMac();
++        if (NULL != local_port_path) {
++            mac_address_ = local_port_path->GetLocalInterMac();
++            LOG(DEBUG,"path peertype mac"<<path->peer()->GetType()<<" "<<mac_address_<<endl); 
++        }
++    } else {
++        label_ = path->GetActiveLabel();
++    }
++    vxlanid_ = path->GetActiveLabel();
+     vn_ = path->dest_vn_name();
+     sg_list_ = path->sg_list();
+     communities_ = path->communities();
+@@ -175,15 +199,18 @@ void RouteExport::UnicastNotify(AgentXmppChannel *bgp_xmpp_peer,
+     }
+ 
+     if (path) {
++
+         if (state->Changed(route, path)) {
+             VnListType vn_list;
+             vn_list.insert(state->vn_);
+-            state->Update(route, path);
++            state->Update(route, path, type);
++            
++            LOG(DEBUG," UnicastNotify l3vxlan tunnelBmap Label arp_mac: "<<path->GetTunnelBmap()<<" "<<state->label_<<" "<<path->GetLocalInterMac()<<endl);
+             state->exported_ = 
+                 AgentXmppChannel::ControllerSendRouteAdd(bgp_xmpp_peer, 
+                         static_cast<AgentRoute * >(route),
+                         path->NexthopIp(table->agent()), vn_list,
+-                        state->label_, path->GetTunnelBmap(),
++                        state->label_, state->vxlanid_, state->mac_address_, path->GetTunnelBmap(),
+                         &path->sg_list(), &path->communities(),
+                         type, state->path_preference_,
+                         state->ecmp_load_balance_);
+@@ -195,7 +222,7 @@ void RouteExport::UnicastNotify(AgentXmppChannel *bgp_xmpp_peer,
+             AgentXmppChannel::ControllerSendRouteDelete(bgp_xmpp_peer, 
+                     static_cast<AgentRoute *>(route), vn_list,
+                     (state->tunnel_type_ == TunnelType::VXLAN ?
+-                     state->label_ : 0),
++                     state->vxlanid_ : 0),
+                     TunnelType::AllType(), NULL, NULL,
+                     type, state->path_preference_);
+             state->exported_ = false;
+diff --git a/src/vnsw/agent/controller/controller_export.h b/src/vnsw/agent/controller/controller_export.h
+old mode 100644
+new mode 100755
+index 542655130..cebe88199
+--- a/src/vnsw/agent/controller/controller_export.h
++++ b/src/vnsw/agent/controller/controller_export.h
+@@ -24,7 +24,11 @@ public:
+         bool ingress_replication_exported_; //Used by multicast
+         bool fabric_multicast_exported_; //Used by multicast
+         bool force_chg_;
++		//only L3Label
+         uint32_t label_;
++		//only vxlanid or L3lable
++		uint32_t vxlanid_;
++		std::string mac_address_;
+         std::string vn_;
+         SecurityGroupList sg_list_;
+         CommunityList communities_;
+@@ -36,7 +40,7 @@ public:
+         EcmpLoadBalance ecmp_load_balance_;
+ 
+         bool Changed(const AgentRoute *route, const AgentPath *path) const;
+-        void Update(const AgentRoute *route, const AgentPath *path);
++        void Update(const AgentRoute *route, const AgentPath *path, Agent::RouteTableType type);
+     };
+     RouteExport(AgentRouteTable *rt);
+     ~RouteExport();
+diff --git a/src/vnsw/agent/controller/controller_peer.cc b/src/vnsw/agent/controller/controller_peer.cc
+old mode 100644
+new mode 100755
+index 15fd9b5d6..d9e841969
+--- a/src/vnsw/agent/controller/controller_peer.cc
++++ b/src/vnsw/agent/controller/controller_peer.cc
+@@ -319,6 +319,8 @@ GetTypeBitmap(const TunnelEncapsulationListType &encap) {
+             bmap |= (1 << TunnelType::MPLS_GRE);
+         if (encap == TunnelEncapType::MPLS_O_UDP)
+             bmap |= (1 << TunnelType::MPLS_UDP);
++        if (encap == TunnelEncapType::VXLAN)
++            bmap |= (1 << TunnelType::VXLAN);
+     }
+     return bmap;
+ }
+@@ -643,7 +645,8 @@ void AgentXmppChannel::AddEcmpRoute(string vrf_name, IpAddress prefix_addr,
+     GetEcmpHashFieldsToUse(item, ecmp_load_balance);
+ 
+     PathPreference::Preference preference = PathPreference::LOW;
+-    TunnelType::TypeBmap encap = TunnelType::MplsType(); //default
++    //changed default gre to vxlan
++    TunnelType::TypeBmap encap = TunnelType::VxlanType(); //default
+     if (item->entry.local_preference == PathPreference::HIGH) {
+         preference = PathPreference::HIGH;
+     }
+@@ -861,12 +864,13 @@ void AgentXmppChannel::AddEvpnRoute(const std::string &vrf_name,
+         vn_list.insert(item->entry.virtual_network);
+         // for number of nexthops more than 1, carry flag ecmp suppressed
+         // to indicate the same to all modules, till we handle L2 ecmp
++        //evpn donot need to identify vxlanid, the real vxlanid is label.
+         ControllerVmRoute *data =
+             ControllerVmRoute::MakeControllerVmRoute(bgp_peer_id(),
+                                                      agent_->fabric_vrf_name(),
+                                                      agent_->router_id(),
+                                                      vrf_name, nh_ip.to_v4(),
+-                                                     encap, label,
++                                                     encap, label, label,
+                                                      vn_list,
+                                                      item->entry.security_group_list.security_group,
+                                                      path_preference,
+@@ -974,6 +978,9 @@ void AgentXmppChannel::AddRemoteRoute(string vrf_name, IpAddress prefix_addr,
+     boost::system::error_code ec;
+     string nexthop_addr = item->entry.next_hops.next_hop[0].address;
+     uint32_t label = item->entry.next_hops.next_hop[0].label;
++    uint32_t vxlan_id = item->entry.next_hops.next_hop[0].vxlanid;
++    string mac_address = item->entry.next_hops.next_hop[0].macaddress;
++
+     IpAddress addr = IpAddress::from_string(nexthop_addr, ec);
+     TunnelType::TypeBmap encap = GetTypeBitmap
+         (item->entry.next_hops.next_hop[0].tunnel_encapsulation_list);
+@@ -983,6 +990,7 @@ void AgentXmppChannel::AddRemoteRoute(string vrf_name, IpAddress prefix_addr,
+                          "Error parsing nexthop ip address");
+         return;
+     }
++    LOG(DEBUG,"AddRemoteRoute L3Vxlan mac_address/vxlanid "<<mac_address<<" "<<vxlan_id<<endl);
+ 
+     PathPreference::Preference preference = PathPreference::LOW;
+     if (item->entry.local_preference == PathPreference::HIGH) {
+@@ -995,6 +1003,12 @@ void AgentXmppChannel::AddRemoteRoute(string vrf_name, IpAddress prefix_addr,
+          vnit != vn_list.end(); ++vnit) {
+         vn_string += *vnit + " ";
+     }
++
++    
++    int len = vn_string.length();
++
++    std::string vn_string_tmp =vn_string.substr(0,len-2);
++
+     CONTROLLER_INFO_TRACE(RouteImport, GetBgpPeerName(), vrf_name,
+                      prefix_addr.to_string(), prefix_len,
+                      addr.to_v4().to_string(), label, vn_string);
+@@ -1003,9 +1017,9 @@ void AgentXmppChannel::AddRemoteRoute(string vrf_name, IpAddress prefix_addr,
+         EcmpLoadBalance ecmp_load_balance;
+         GetEcmpHashFieldsToUse(item, ecmp_load_balance);
+         ControllerVmRoute *data =
+-            ControllerVmRoute::MakeControllerVmRoute(bgp_peer_id(),
++            ControllerVmRoute::MakeControllerVmRouteL3Vxlan(bgp_peer_id(),
+                                agent_->fabric_vrf_name(), agent_->router_id(),
+-                               vrf_name, addr.to_v4(), encap, label, vn_list,
++                               vrf_name, addr.to_v4(), encap, label, vxlan_id, mac_address, vn_list,
+                                item->entry.security_group_list.security_group,
+                                path_preference, false, ecmp_load_balance);
+         rt_table->AddRemoteVmRouteReq(bgp_peer_id(), vrf_name, prefix_addr,
+@@ -1029,10 +1043,11 @@ void AgentXmppChannel::AddRemoteRoute(string vrf_name, IpAddress prefix_addr,
+             EcmpLoadBalance ecmp_load_balance;
+             GetEcmpHashFieldsToUse(item, ecmp_load_balance);
+             BgpPeer *bgp_peer = bgp_peer_id();
+-            if (interface->type() == Interface::VM_INTERFACE) {
++            LOG(DEBUG,"vrf_name vn_string "<<vrf_name<<" "<<vn_string<<vrf_name.find(vn_string));
++            if ((interface->type() == Interface::VM_INTERFACE)&&((vrf_name.find(vn_string_tmp) == std::string::npos ))) {
+                 ControllerLocalVmRoute *local_vm_route =
+                     new ControllerLocalVmRoute(intf_key, label,
+-                                               VxLanTable::kInvalidvxlan_id,
++                                               vxlan_id,
+                                                false, vn_list,
+                                                InterfaceNHFlags::INET4,
+                                                item->entry.security_group_list.security_group,
+@@ -1792,6 +1807,8 @@ bool AgentXmppChannel::ControllerSendV4V6UnicastRouteCommon(AgentRoute *route,
+                                        const SecurityGroupList *sg_list,
+                                        const CommunityList *communities,
+                                        uint32_t mpls_label,
++                                       uint32_t vxlan_id,
++                                       string   mac_address,
+                                        TunnelType::TypeBmap bmap,
+                                        const PathPreference &path_preference,
+                                        bool associate,
+@@ -1823,12 +1840,20 @@ bool AgentXmppChannel::ControllerSendV4V6UnicastRouteCommon(AgentRoute *route,
+     autogen::NextHopType nh;
+     nh.af = BgpAf::IPv4;
+     nh.address = rtr;
++    nh.macaddress = mac_address;
+     nh.label = mpls_label;
++    nh.vxlanid = vxlan_id;
++    
++    
+     if (bmap & TunnelType::GREType()) {
+         nh.tunnel_encapsulation_list.tunnel_encapsulation.push_back("gre");
+-    }
+-    if (bmap & TunnelType::UDPType()) {
++    } else if (bmap & TunnelType::UDPType()) {
+         nh.tunnel_encapsulation_list.tunnel_encapsulation.push_back("udp");
++    } else if (bmap & TunnelType::VxlanType() ) {
++       LOG(DEBUG," l3vxlan should send vxlan next hop:");
++        nh.tunnel_encapsulation_list.tunnel_encapsulation.push_back("vxlan");
++    } else {
++        assert(0);
+     }
+     for (VnListType::const_iterator vnit = vn_list.begin();
+          vnit != vn_list.end(); ++vnit) {
+@@ -2451,6 +2476,8 @@ bool AgentXmppChannel::ControllerSendRouteAdd(AgentXmppChannel *peer,
+                                               const Ip4Address *nexthop_ip,
+                                               const VnListType &vn_list,
+                                               uint32_t label,
++                                              uint32_t vxlanid,
++                                              std::string mac_address,
+                                               TunnelType::TypeBmap bmap,
+                                               const SecurityGroupList *sg_list,
+                                               const CommunityList *communities,
+@@ -2469,7 +2496,7 @@ bool AgentXmppChannel::ControllerSendRouteAdd(AgentXmppChannel *peer,
+     if (((type == Agent::INET4_UNICAST) || (type == Agent::INET6_UNICAST)) &&
+          (peer->agent()->simulate_evpn_tor() == false)) {
+         ret = peer->ControllerSendV4V6UnicastRouteCommon(route, vn_list,
+-                                                   sg_list, communities, label,
++                                                   sg_list, communities, label, vxlanid, mac_address,
+                                                    bmap, path_preference, true,
+                                                    type, ecmp_load_balance);
+     }
+@@ -2477,8 +2504,9 @@ bool AgentXmppChannel::ControllerSendRouteAdd(AgentXmppChannel *peer,
+         std::string vn;
+         if (vn_list.size())
+             vn = *vn_list.begin();
++        //only vxlanid is used for evpn
+         ret = peer->ControllerSendEvpnRouteCommon(route, nexthop_ip, vn,
+-                                                  sg_list, communities, label,
++                                                  sg_list, communities, vxlanid,
+                                                   bmap, "", "",
+                                                   path_preference, true);
+     }
+@@ -2509,7 +2537,7 @@ bool AgentXmppChannel::ControllerSendRouteDelete(AgentXmppChannel *peer,
+         EcmpLoadBalance ecmp_load_balance;
+         ret = peer->ControllerSendV4V6UnicastRouteCommon(route, vn_list,
+                                                        sg_list, communities,
+-                                                       label,
++                                                       label, 0, "ff:ff:ff:ff:ff",
+                                                        bmap,
+                                                        path_preference,
+                                                        false,
+diff --git a/src/vnsw/agent/controller/controller_peer.h b/src/vnsw/agent/controller/controller_peer.h
+old mode 100644
+new mode 100755
+index f5c909fe8..0d60ccf9e
+--- a/src/vnsw/agent/controller/controller_peer.h
++++ b/src/vnsw/agent/controller/controller_peer.h
+@@ -16,6 +16,7 @@
+ #include <xmpp_enet_types.h>
+ #include <xmpp_unicast_types.h>
+ #include <cmn/agent.h>
++#include <init/agent_param.h>
+ 
+ class AgentRoute;
+ class Peer;
+@@ -70,6 +71,8 @@ public:
+                                        const Ip4Address *nexthop_ip,
+                                        const VnListType &vn_list,
+                                        uint32_t label,
++                                       uint32_t vxlanid,
++                                       std::string mac_address,
+                                        uint32_t tunnel_bmap,
+                                        const SecurityGroupList *sg_list,
+                                        const CommunityList *communities,
+@@ -186,7 +189,9 @@ private:
+                                             const VnListType &vn_list,
+                                             const SecurityGroupList *sg_list,
+                                             const CommunityList *communities,
+-                                            uint32_t mpls_label,
++                                            uint32_t mpls_label,                                         
++	                                        uint32_t vxlan_id,
++                                        	std::string	 mac_address,
+                                             uint32_t tunnel_bmap,
+                                             const PathPreference &path_preference,
+                                             bool associate,
+diff --git a/src/vnsw/agent/controller/controller_route_path.cc b/src/vnsw/agent/controller/controller_route_path.cc
+old mode 100644
+new mode 100755
+index 3f152752a..148796f91
+--- a/src/vnsw/agent/controller/controller_route_path.cc
++++ b/src/vnsw/agent/controller/controller_route_path.cc
+@@ -112,6 +112,7 @@ ControllerVmRoute *ControllerVmRoute::MakeControllerVmRoute(const Peer *peer,
+                                          const Ip4Address &tunnel_dest,
+                                          TunnelType::TypeBmap bmap,
+                                          uint32_t label,
++                                         uint32_t vxlanid,
+                                          const VnListType &dest_vn_list,
+                                          const SecurityGroupList &sg_list,
+                                          const PathPreference &path_preference,
+@@ -125,13 +126,42 @@ ControllerVmRoute *ControllerVmRoute::MakeControllerVmRoute(const Peer *peer,
+ 
+     // Make route request pointing to Tunnel-NH created above
+     ControllerVmRoute *data =
+-        new ControllerVmRoute(peer, default_vrf, tunnel_dest, label,
++        new ControllerVmRoute(peer, default_vrf, tunnel_dest, label, vxlanid,
+                               dest_vn_list, bmap, sg_list, path_preference,
+                               nh_req, ecmp_suppressed,
+                               ecmp_load_balance);
+     return data;
+ }
+ 
++ ControllerVmRoute *ControllerVmRoute::MakeControllerVmRouteL3Vxlan(const Peer *peer,
++                                           const string &default_vrf,
++                                           const Ip4Address &router_id,
++                                           const string &vrf_name,
++                                           const Ip4Address &tunnel_dest,
++                                           TunnelType::TypeBmap bmap,
++                                           uint32_t label,
++                                           uint32_t vxlan_id,
++                                           const string mac_address,
++                                           const VnListType &dest_vn_list,
++                                           const SecurityGroupList &sg_list,
++                                           const PathPreference &path_preference,
++                                           bool ecmp_suppressed,
++                                           const EcmpLoadBalance &ecmp_load_balance){
++
++    // Make Tunnel-NH request
++    DBRequest nh_req(DBRequest::DB_ENTRY_ADD_CHANGE);
++    nh_req.key.reset(new TunnelNHKey(default_vrf, router_id, tunnel_dest, false,
++                         TunnelType::ComputeType(bmap)));
++    nh_req.data.reset(new TunnelNHData());
++    LOG(DEBUG," "<<mac_address<<endl);
++    // Make route request pointing to Tunnel-NH created above
++    ControllerVmRoute *data =  new ControllerVmRoute(peer, default_vrf, tunnel_dest, label, vxlan_id,
++                       mac_address, dest_vn_list, bmap, sg_list, path_preference,
++                       nh_req, ecmp_suppressed,ecmp_load_balance);
++    return data;
++}
++
++
+ string ControllerVmRoute::PeerInvalidMsg(const AgentRouteKey *key) const {
+     return GetInvalidPeerMsg("ControllerVmRoute", channel(), sequence_number());
+ }
+@@ -191,14 +221,17 @@ bool ControllerVmRoute::AddChangePath(Agent *agent, AgentPath *path,
+          (new_tunnel_type != TunnelType::VXLAN)) ||
+         (tunnel_bmap_ != (1 << TunnelType::VXLAN) &&
+          (new_tunnel_type == TunnelType::VXLAN))) {
+-        new_tunnel_type = TunnelType::INVALID;
++         //l3vxlan changed into vxlan from invalid
++        new_tunnel_type = TunnelType::VXLAN;
+         nh_req_.key.reset(new TunnelNHKey(agent->fabric_vrf_name(),
+                                           agent->router_id(), tunnel_dest_,
+                                           false, new_tunnel_type));
+     }
++    //create nh and not get ruturn value
+     agent->nexthop_table()->Process(nh_req_);
+     TunnelNHKey key(agent->fabric_vrf_name(), agent->router_id(), tunnel_dest_,
+                     false, new_tunnel_type);
++    ///search new added nh in NHTable
+     nh = static_cast<NextHop *>(agent->nexthop_table()->FindActiveEntry(&key));
+     path->set_tunnel_dest(tunnel_dest_);
+ 
+@@ -209,12 +242,13 @@ bool ControllerVmRoute::AddChangePath(Agent *agent, AgentPath *path,
+ 
+     //Interpret label sent by control node
+     if (tunnel_bmap_ == TunnelType::VxlanType()) {
+-        //Only VXLAN encap is sent, so label is VXLAN
+-        path->set_vxlan_id(label_);
+-        if (path->label() != MplsTable::kInvalidLabel) {
+-            path->set_label(MplsTable::kInvalidLabel);
++           //Only VXLAN encap is sent, so label is VXLAN ,for l3vxlan is not right.
++            LOG(DEBUG," label/vxlanid"<<__FILE__<<" "<<label_<<"  "<<vxlan_id_<<" "<<mac_address_<<endl);
++            path->set_vxlan_id(vxlan_id_);
++            path->set_label(label_);
++            TunnelNH *tnl_nh = static_cast<TunnelNH *>(nh);
++            tnl_nh->SetImac(mac_address_);      
+             ret = true;
+-        }
+     } else if (tunnel_bmap_ == TunnelType::MplsType()) {
+         //MPLS (GRE/UDP) is the only encap sent,
+         //so label is MPLS.
+@@ -222,20 +256,20 @@ bool ControllerVmRoute::AddChangePath(Agent *agent, AgentPath *path,
+             path->set_label(label_);
+             ret = true;
+         }
+-        path->set_vxlan_id(VxLanTable::kInvalidvxlan_id);
++        path->set_vxlan_id(vxlan_id_);
+     } else {
+         //Got a mix of Vxlan and Mpls, so interpret label
+         //as per the computed tunnel type.
+         if (new_tunnel_type == TunnelType::VXLAN) {
+             if (path->vxlan_id() != label_) {
+-                path->set_vxlan_id(label_);
+-                path->set_label(MplsTable::kInvalidLabel);
++                path->set_vxlan_id(vxlan_id_);
++                path->set_label(label_);
+                 ret = true;
+             }
+         } else {
+             if (path->label() != label_) {
+                 path->set_label(label_);
+-                path->set_vxlan_id(VxLanTable::kInvalidvxlan_id);
++                path->set_vxlan_id(vxlan_id_);
+                 ret = true;
+             }
+         }
+diff --git a/src/vnsw/agent/controller/controller_route_path.h b/src/vnsw/agent/controller/controller_route_path.h
+old mode 100644
+new mode 100755
+index f065b2b1e..4bd91cb2e
+--- a/src/vnsw/agent/controller/controller_route_path.h
++++ b/src/vnsw/agent/controller/controller_route_path.h
+@@ -72,19 +72,31 @@ private:
+  */
+ class ControllerVmRoute : public ControllerPeerPath {
+ public:
+-    ControllerVmRoute(const Peer *peer, const string &vrf_name,
+-                  const Ip4Address &addr, uint32_t label,
++   	 ControllerVmRoute(const Peer *peer, const string &vrf_name,
++                  const Ip4Address &addr, uint32_t label, uint32_t vxlan_id,
+                   const VnListType &dest_vn_list, int bmap,
+                   const SecurityGroupList &sg_list,
+                   const PathPreference &path_preference,
+                   DBRequest &req, bool ecmp_suppressed,
+                   const EcmpLoadBalance &ecmp_load_balance):
+         ControllerPeerPath(peer), server_vrf_(vrf_name), tunnel_dest_(addr),
+-        tunnel_bmap_(bmap), label_(label), dest_vn_list_(dest_vn_list),
++        tunnel_bmap_(bmap), label_(label), vxlan_id_(vxlan_id), dest_vn_list_(dest_vn_list),
+         sg_list_(sg_list),path_preference_(path_preference),
+         ecmp_suppressed_(ecmp_suppressed), ecmp_load_balance_(ecmp_load_balance)
+         {nh_req_.Swap(&req);}
+-    // Data passed in case of delete from BGP peer, to validate 
++    ControllerVmRoute(const Peer *peer, const string &vrf_name,
++                  const Ip4Address &addr, uint32_t label, uint32_t vxlan_id, string mac_address,
++                  const VnListType &dest_vn_list, int bmap,
++                  const SecurityGroupList &sg_list,
++                  const PathPreference &path_preference,
++                  DBRequest &req, bool ecmp_suppressed,
++                  const EcmpLoadBalance &ecmp_load_balance):
++        ControllerPeerPath(peer), server_vrf_(vrf_name), tunnel_dest_(addr),
++        tunnel_bmap_(bmap), label_(label), vxlan_id_(vxlan_id), mac_address_(mac_address), dest_vn_list_(dest_vn_list),
++        sg_list_(sg_list),path_preference_(path_preference),
++        ecmp_suppressed_(ecmp_suppressed), ecmp_load_balance_(ecmp_load_balance)
++        {nh_req_.Swap(&req);} 
++   // Data passed in case of delete from BGP peer, to validate 
+     // the request at time of processing.
+     ControllerVmRoute(const Peer *peer) : ControllerPeerPath(peer) { }
+     virtual ~ControllerVmRoute() { }
+@@ -103,6 +115,22 @@ public:
+                                             const Ip4Address &tunnel_dest,
+                                             TunnelType::TypeBmap bmap,
+                                             uint32_t label,
++                                            uint32_t vxlan_id,
++                                            const VnListType &dest_vn_list,
++                                            const SecurityGroupList &sg_list,
++                                            const PathPreference &path_preference,
++                                            bool ecmp_suppressed,
++                                            const EcmpLoadBalance &ecmp_load_balance);
++	
++    static ControllerVmRoute *MakeControllerVmRouteL3Vxlan(const Peer *peer,
++                                            const string &default_vrf,
++                                            const Ip4Address &router_id,
++                                            const string &vrf_name,
++                                            const Ip4Address &tunnel_dest,
++                                            TunnelType::TypeBmap bmap,
++                                            uint32_t label,
++                                            uint32_t vxlan_id,
++                                            const string  mac_address,
+                                             const VnListType &dest_vn_list,
+                                             const SecurityGroupList &sg_list,
+                                             const PathPreference &path_preference,
+@@ -114,6 +142,8 @@ private:
+     Ip4Address tunnel_dest_;
+     TunnelType::TypeBmap tunnel_bmap_;
+     uint32_t label_;
++	uint32_t vxlan_id_;
++    string mac_address_;
+     VnListType dest_vn_list_;
+     SecurityGroupList sg_list_;
+     PathPreference path_preference_;
+diff --git a/src/vnsw/agent/openstack/instance_service_server.cc b/src/vnsw/agent/openstack/instance_service_server.cc
+index 146441b83..b1929f803 100644
+--- a/src/vnsw/agent/openstack/instance_service_server.cc
++++ b/src/vnsw/agent/openstack/instance_service_server.cc
+@@ -354,7 +354,7 @@ InstanceServiceAsyncHandler::RouteEntryAdd(const std::string& ip_address,
+                                                  agent_->router_id(),
+                                                  vrf, gwv4,
+                                                  TunnelType::AllType(),
+-                                                 mpls_label,
++                                                 mpls_label, 0,
+                                                  vn_list, SecurityGroupList(),
+                                                  PathPreference(), false,
+                                                  EcmpLoadBalance());
+@@ -465,7 +465,7 @@ InstanceServiceAsyncHandler::AddRemoteVmRoute(const std::string& ip_address,
+         ControllerVmRoute::MakeControllerVmRoute(novaPeer_.get(),
+                               agent_->fabric_vrf_name(),
+                               agent_->router_id(), vrf, gw.to_v4(),
+-                              TunnelType::AllType(), mpls_label, vn_list,
++                              TunnelType::AllType(), mpls_label, 0,vn_list,
+                               SecurityGroupList(), PathPreference(), false,
+                               EcmpLoadBalance());
+     agent_->fabric_inet4_unicast_table()->
+diff --git a/src/vnsw/agent/oper/agent_path.cc b/src/vnsw/agent/oper/agent_path.cc
+old mode 100644
+new mode 100755
+index 2471e5533..119c2c665
+--- a/src/vnsw/agent/oper/agent_path.cc
++++ b/src/vnsw/agent/oper/agent_path.cc
+@@ -62,6 +62,17 @@ uint32_t AgentPath::GetActiveLabel() const {
+         return label_;
+     }
+ }
++//l3vxlan  
++uint32_t AgentPath::GetL3ActiveLabel() const {
++        return label_;
++}
++//vxlan get local_interface_mac
++string AgentPath::GetLocalInterMac() const {
++    NextHop *local_vm_nh = nexthop();
++    InterfaceNH *interace_vm_nh = (InterfaceNH *)local_vm_nh;
++    MacAddress local_vm_mac  = interace_vm_nh->GetDMac();
++    return local_vm_mac.ToString();
++}
+ 
+ NextHop* AgentPath::nexthop() const {
+     return nh_.get();
+@@ -1240,7 +1251,7 @@ void AgentPath::SetSandeshData(PathSandeshData &pdata) const {
+                 path_preference_.dependent_ip().to_string());
+     }
+     pdata.set_path_preference_data(path_preference_data);
+-    pdata.set_active_label(GetActiveLabel());
++    pdata.set_active_label(GetL3ActiveLabel());
+     if (peer()->GetType() == Peer::MAC_VM_BINDING_PEER) {
+         const MacVmBindingPath *dhcp_path =
+             static_cast<const MacVmBindingPath *>(this);
+diff --git a/src/vnsw/agent/oper/agent_path.h b/src/vnsw/agent/oper/agent_path.h
+old mode 100644
+new mode 100755
+index 6d067a831..d78dab6be
+--- a/src/vnsw/agent/oper/agent_path.h
++++ b/src/vnsw/agent/oper/agent_path.h
+@@ -180,6 +180,8 @@ public:
+     const VnListType &dest_vn_list() const {return dest_vn_list_;}
+     void GetDestinationVnList(std::vector<std::string> *vn_list) const;
+     uint32_t GetActiveLabel() const;
++	uint32_t GetL3ActiveLabel() const;
++	string  GetLocalInterMac() const;
+     NextHop *nexthop() const;
+     const Peer *peer() const {return peer_;}
+     uint32_t label() const {return label_;}
+@@ -456,7 +458,7 @@ public:
+         vxlan_id_(vxlan_id), force_policy_(force_policy),
+         dest_vn_list_(vn_list), proxy_arp_(false), sync_route_(false),
+         flags_(flags), sg_list_(sg_list), communities_(communities),
+-        tunnel_bmap_(TunnelType::MplsType()),
++        tunnel_bmap_(TunnelType::VxlanType()),
+         path_preference_(path_preference),
+         subnet_service_ip_(subnet_service_ip),
+         ecmp_load_balance_(ecmp_load_balance) {
+diff --git a/src/vnsw/agent/oper/agent_route.cc b/src/vnsw/agent/oper/agent_route.cc
+old mode 100644
+new mode 100755
+index 0d64f4841..6c1ae01e5
+--- a/src/vnsw/agent/oper/agent_route.cc
++++ b/src/vnsw/agent/oper/agent_route.cc
+@@ -641,6 +641,21 @@ AgentPath *AgentRoute::FindLocalVmPortPath() const {
+     return NULL;
+ }
+ 
++AgentPath *AgentRoute::FindLocalVmPortPathForMac() const {
++    for(Route::PathList::const_iterator it = GetPathList().begin(); 
++        it != GetPathList().end(); it++) {
++        const AgentPath *path = static_cast<const AgentPath *>(it.operator->());
++        if (path->peer() == NULL) {
++            continue;
++        }
++        if (path->peer()->GetType() == Peer::LOCAL_VM_PORT_PEER ) {
++            return const_cast<AgentPath *>(path);
++        }
++    }
++    return NULL;
++}
++
++
+ AgentPath *AgentRoute::FindStalePath() {
+     Route::PathList::iterator it = GetPathList().begin();
+     while (it != GetPathList().end()) {
+diff --git a/src/vnsw/agent/oper/agent_route.h b/src/vnsw/agent/oper/agent_route.h
+old mode 100644
+new mode 100755
+index 06538e501..d62c8ded9
+--- a/src/vnsw/agent/oper/agent_route.h
++++ b/src/vnsw/agent/oper/agent_route.h
+@@ -270,6 +270,7 @@ public:
+     uint32_t vrf_id() const;
+ 
+     AgentPath *FindLocalVmPortPath() const;
++	AgentPath *FindLocalVmPortPathForMac() const;
+     AgentPath *FindStalePath();
+     const AgentPath *GetActivePath() const;
+     const NextHop *GetActiveNextHop() const; 
+diff --git a/src/vnsw/agent/oper/inet_unicast_route.cc b/src/vnsw/agent/oper/inet_unicast_route.cc
+index 37afff57a..7fb3bd918 100755
+--- a/src/vnsw/agent/oper/inet_unicast_route.cc
++++ b/src/vnsw/agent/oper/inet_unicast_route.cc
+@@ -1230,6 +1230,37 @@ InetUnicastAgentRouteTable::AddLocalVmRoute(const Peer *peer,
+     InetUnicastTableProcess(Agent::GetInstance(), vm_vrf, req);
+ }
+ 
++void 
++InetUnicastAgentRouteTable::AddLocalVmRoute(const Peer *peer,
++                                            const string &vm_vrf,
++                                            const IpAddress &addr,
++                                            uint8_t plen,
++                                            const uuid &intf_uuid,
++                                            const VnListType &vn_list,
++                                            uint32_t vxlan_id,
++                                            uint32_t label,
++                                            const SecurityGroupList &sg_list,
++                                            const CommunityList &communities,
++                                            bool force_policy,
++                                            const PathPreference
++                                            &path_preference,
++                                            const IpAddress &subnet_service_ip,
++                                            const EcmpLoadBalance &ecmp_load_balance)
++{
++    DBRequest req(DBRequest::DB_ENTRY_ADD_CHANGE);
++    req.key.reset(new InetUnicastRouteKey(peer, vm_vrf, addr, plen));
++
++    VmInterfaceKey intf_key(AgentKey::ADD_DEL_CHANGE, intf_uuid, "");
++    
++    req.data.reset(new LocalVmRoute(intf_key, label, vxlan_id,
++                                    force_policy, vn_list,
++                                    InterfaceNHFlags::INET4, sg_list, communities,
++                                    path_preference, subnet_service_ip,
++                                    ecmp_load_balance));
++    InetUnicastTableProcess(Agent::GetInstance(), vm_vrf, req);
++}
++
++
+ void 
+ InetUnicastAgentRouteTable::AddRemoteVmRouteReq(const Peer *peer, 
+                                                 const string &vm_vrf,
+diff --git a/src/vnsw/agent/oper/inet_unicast_route.h b/src/vnsw/agent/oper/inet_unicast_route.h
+index 3be3c1371..bb59c9298 100755
+--- a/src/vnsw/agent/oper/inet_unicast_route.h
++++ b/src/vnsw/agent/oper/inet_unicast_route.h
+@@ -228,6 +228,23 @@ public:
+                                 const PathPreference &path_preference,
+                                 const IpAddress &subnet_service_ip,
+                                 const EcmpLoadBalance &ecmp_load_balance);
++	
++	 static  void AddLocalVmRoute(const Peer *peer,
++                                const string &vm_vrf,
++                                const IpAddress &addr,
++                                uint8_t plen,
++                                const uuid &intf_uuid,
++                                const VnListType &vn_list,
++                                uint32_t vxlanid,
++                                uint32_t label,
++                                const SecurityGroupList &sg_list,
++                                const CommunityList &communities,
++                                bool force_policy,
++                                const PathPreference
++                                &path_preference,
++                                const IpAddress &subnet_service_ip,
++                                const EcmpLoadBalance &ecmp_load_balance);
++	
+     static void AddRemoteVmRouteReq(const Peer *peer, const string &vm_vrf,
+                                     const IpAddress &vm_addr,uint8_t plen,
+                                     AgentRouteData *data);
+diff --git a/src/vnsw/agent/oper/nexthop.cc b/src/vnsw/agent/oper/nexthop.cc
+old mode 100644
+new mode 100755
+diff --git a/src/vnsw/agent/oper/nexthop.h b/src/vnsw/agent/oper/nexthop.h
+old mode 100644
+new mode 100755
+index e0d1eca63..07aee5fa1
+--- a/src/vnsw/agent/oper/nexthop.h
++++ b/src/vnsw/agent/oper/nexthop.h
+@@ -239,7 +239,8 @@ public:
+         INVALID,
+         MPLS_GRE,
+         MPLS_UDP,
+-        VXLAN
++        VXLAN,
++        
+     };
+     // Bitmap of supported tunnel types
+     typedef uint32_t TypeBmap;
+diff --git a/src/vnsw/agent/oper/tunnel_nh.h b/src/vnsw/agent/oper/tunnel_nh.h
+old mode 100644
+new mode 100755
+index dfec45b1b..ae35d87c5
+--- a/src/vnsw/agent/oper/tunnel_nh.h
++++ b/src/vnsw/agent/oper/tunnel_nh.h
+@@ -33,6 +33,10 @@ public:
+     const Ip4Address *GetDip() const {return &dip_;};
+     const AgentRoute *GetRt() const {return arp_rt_.get();};
+     const TunnelType &GetTunnelType() const {return tunnel_type_;};
++	void SetImac(string idmac) {
++    	idmac_ = idmac;
++	}
++	const string GetImac() const { return idmac_;}
+     virtual void SendObjectLog(const NextHopTable *table,
+                                AgentLogEvent::type event) const;
+     virtual bool DeleteOnZeroRefCount() const {
+@@ -46,6 +50,8 @@ private:
+     DependencyRef<NextHop, AgentRoute> arp_rt_;
+     InterfaceConstRef interface_;
+     MacAddress dmac_;
++	//inner dst mac for vxlan
++	string idmac_;
+     DISALLOW_COPY_AND_ASSIGN(TunnelNH);
+ };
+ 
+diff --git a/src/vnsw/agent/oper/vm_interface.cc b/src/vnsw/agent/oper/vm_interface.cc
+index dafe3aeac..3ddd7237c 100755
+--- a/src/vnsw/agent/oper/vm_interface.cc
++++ b/src/vnsw/agent/oper/vm_interface.cc
+@@ -3612,9 +3612,11 @@ void VmInterface::AddRoute(const std::string &vrf_name, const IpAddress &addr,
+     vn_list.insert(dest_vn);
+     EcmpLoadBalance ecmp_load_balance;
+     CopyEcmpLoadBalance(ecmp_load_balance);
++
++    LOG(DEBUG,"vxlan interfacename/label "<<addr.to_string()<<" "<<label<<endl);
+     InetUnicastAgentRouteTable::AddLocalVmRoute(peer_.get(), vrf_name, addr,
+                                                  plen, GetUuid(),
+-                                                 vn_list, label,
++                                                 vn_list, vxlan_id(), label,
+                                                  sg_id_list, communities, false,
+                                                  path_preference, service_ip,
+                                                  ecmp_load_balance);
+diff --git a/src/vnsw/agent/vrouter/ksync/nexthop_ksync.cc b/src/vnsw/agent/vrouter/ksync/nexthop_ksync.cc
+old mode 100644
+new mode 100755
+index d3feab918..6dc042a2a
+--- a/src/vnsw/agent/vrouter/ksync/nexthop_ksync.cc
++++ b/src/vnsw/agent/vrouter/ksync/nexthop_ksync.cc
+@@ -723,7 +723,7 @@ int NHKSyncEntry::Encode(sandesh_op::type op, char *buf, int buf_len) {
+                 flags |= NH_FLAG_TUNNEL_UDP_MPLS;
+             } else if (tunnel_type_.GetType() == TunnelType::MPLS_GRE) {
+                 flags |= NH_FLAG_TUNNEL_GRE;
+-            } else {
++            } else   {     
+                 flags |= NH_FLAG_TUNNEL_VXLAN;
+             }
+             break;
+@@ -1147,6 +1147,7 @@ void NHKSyncEntry::SetEncap(InterfaceKSyncEntry *if_ksync,
+     /* Proto encode in Network byte order */
+     encap.push_back(0x08);
+     encap.push_back(0x00);
++
+ }
+ 
+ NHKSyncObject::NHKSyncObject(KSync *ksync) :
+diff --git a/src/vnsw/agent/vrouter/ksync/nexthop_ksync.h b/src/vnsw/agent/vrouter/ksync/nexthop_ksync.h
+old mode 100644
+new mode 100755
+index f98f39180..2e9b8c20d
+--- a/src/vnsw/agent/vrouter/ksync/nexthop_ksync.h
++++ b/src/vnsw/agent/vrouter/ksync/nexthop_ksync.h
+@@ -46,7 +46,7 @@ public:
+     void FillObjectLog(sandesh_op::type op, KSyncNhInfo &info) const;
+     uint32_t nh_id() const { return nh_id_;}
+     void SetEncap(InterfaceKSyncEntry *if_ksync, std::vector<int8_t> &encap);
+-    bool is_bridge() const { return is_bridge_; }
++    bool is_bridge() const { return is_bridge_; }	
+ 
+     int MsgLen() { return kDefaultNhMsgSize; }
+ private:
+commit 286747e3d07f71f27e7ea86a8d97d1ce5b17fc21
+Author: shuqiang <shuqiang.zhao.nj@gmail.com>
+Date:   Fri May 5 17:37:35 2017 +0800
+
+    add local route in evpn table for FIP when MX80 joined
+    
+    Change-Id: I400bf40ded0ab5106729058bdec51ad370ed3890
+
+diff --git a/src/vnsw/agent/oper/evpn_route.cc b/src/vnsw/agent/oper/evpn_route.cc
+index 0a33f627c..04485f495 100644
+--- a/src/vnsw/agent/oper/evpn_route.cc
++++ b/src/vnsw/agent/oper/evpn_route.cc
+@@ -233,7 +233,8 @@ void EvpnAgentRouteTable::AddLocalVmRoute(const Peer *peer,
+     VnListType vn_list;
+     vn_list.insert(vn_name);
+     LocalVmRoute *data = new LocalVmRoute(intf_key, label,
+-                                          intf->vxlan_id(), false,
++                                          //intf->vxlan_id(), false,
++                                          ethernet_tag, false,
+                                           vn_list,
+                                           InterfaceNHFlags::BRIDGE,
+                                           sg_id_list, CommunityList(),
+diff --git a/src/vnsw/agent/oper/vm_interface.cc b/src/vnsw/agent/oper/vm_interface.cc
+index 90b029824..3da98f1ef 100755
+--- a/src/vnsw/agent/oper/vm_interface.cc
++++ b/src/vnsw/agent/oper/vm_interface.cc
+@@ -4028,11 +4028,29 @@ void VmInterface::FloatingIp::L2Activate(VmInterface *interface,
+     if (old_ethernet_tag != interface->ethernet_tag()) {
+         L2DeActivate(interface, old_ethernet_tag);
+     }
+-    evpn_table->AddReceiveRoute(interface->peer_.get(), vrf_->GetName(),
++
++    evpn_table->AddLocalVmRoute(interface->peer_.get(),
++                                vrf_->GetName(),
++                                interface->vm_mac(),
++                                interface,
++                                floating_ip_,
+                                 interface->l2_label(),
++                                vn_->GetName(),
++                                sg_id_list,
++                                path_preference,
++                                vrf_->vxlan_id());
++
++    evpn_table->AddLocalVmRoute(interface->peer_.get(),
++                                vrf_->GetName(),
+                                 interface->vm_mac(),
+-                                floating_ip_, interface->ethernet_tag(),
+-                                vn_->GetName(), path_preference);
++                                interface,
++                                IpAddress::from_string("0.0.0.0"),
++                                interface->l2_label(),
++                                vn_->GetName(),
++                                sg_id_list,
++                                path_preference,
++                                vrf_->vxlan_id());
++
+     l2_installed_ = true;
+     force_l2_update_ = false;
+ }
+@@ -4047,7 +4065,10 @@ void VmInterface::FloatingIp::L2DeActivate(VmInterface *interface,
+     if (evpn_table) {
+         evpn_table->DelLocalVmRoute(interface->peer_.get(), vrf_->GetName(),
+                                     interface->vm_mac(),
+-                                    interface, floating_ip_, ethernet_tag);
++                                    interface, floating_ip_, vrf_->vxlan_id());
++        evpn_table->DelLocalVmRoute(interface->peer_.get(), vrf_->GetName(),
++                                    interface->vm_mac(),
++                                    interface, IpAddress::from_string("0.0.0.0"), vrf_->vxlan_id());
+     }
+     //Reset the interface ethernet_tag
+     l2_installed_ = false;
+
+commit b854e2325d3ed7b4e0446ef34aa31ebb9276b857
+Author: shuqiang <shuqiang.zhao.nj@gmail.com>
+Date:   Fri May 5 17:40:18 2017 +0800
+
+    update L3 route for FIP-Vxlan when MX80 joined
+    
+    Change-Id: I8058c0926ab99498574c097ea50c1371eb27e4c5
+
+diff --git a/src/vnsw/agent/vrouter/ksync/route_ksync.cc b/src/vnsw/agent/vrouter/ksync/route_ksync.cc
+old mode 100644
+new mode 100755
+index 55d1d0f39..7f7e11bfc
+--- a/src/vnsw/agent/vrouter/ksync/route_ksync.cc
++++ b/src/vnsw/agent/vrouter/ksync/route_ksync.cc
+@@ -431,6 +431,11 @@ bool RouteKSyncEntry::Sync(DBEntry *e) {
+         MacAddress mac = MacAddress::ZeroMac();
+         if (obj->RouteNeedsMacBinding(uc_rt)) {
+             mac = obj->GetIpMacBinding(uc_rt->vrf(), addr_);
++        } else if (obj->RouteNeedsMacBindingL3Vxlan(uc_rt)) {
++            boost::system::error_code ec;
++            IpAddress gateway = IpAddress::from_string("172.16.158.254",ec);
++            mac = obj->GetIpMacBinding(uc_rt->vrf(), gateway);
++            LOG(DEBUG," gatewayAddress "<<uc_rt->GetAddressString()<<"gatewaymac "<<mac.ToString()<<endl);
+         }
+ 
+         if (mac != mac_) {
+@@ -513,7 +518,8 @@ int RouteKSyncEntry::Encode(sandesh_op::type op, uint8_t replace_plen,
+                 (addr_.is_v6() && prefix_len_ != 128)) {
+                 LOG(ERROR, "Unexpected MAC stitching for route "
+                     << ToString());
+-                mac_ = MacAddress::ZeroMac();
++                //comment for l3vxlan mx80
++                //mac_ = MacAddress::ZeroMac();
+             }
+             std::vector<int8_t> mac((int8_t *)mac_,
+                                     (int8_t *)mac_ + mac_.size());
+@@ -915,6 +921,30 @@ bool VrfKSyncObject::RouteNeedsMacBinding(const InetUnicastRouteEntry *rt) {
+     return true;
+ }
+ 
++bool VrfKSyncObject::RouteNeedsMacBindingL3Vxlan(const InetUnicastRouteEntry *rt) {
++    if (!rt->addr().is_v4())
++        return false;
++    if (rt->GetAddressString() != "0.0.0.0")
++        return false;
++    if (rt->plen() != 0)
++        return false;
++
++    //Check if VN is enabled for bridging, if not then skip mac binding.
++     VnEntry *vn= rt->vrf()->vn();
++     if (vn == NULL || (vn->bridging() == false))
++         return false;
++
++     const NextHop *nh = rt->GetActiveNextHop();
++     if (nh == NULL)
++        return false;
++     if (nh->GetType() != NextHop::TUNNEL)
++         return false;
++     if (IsGatewayOrServiceInterface(nh) == true)
++         return false;
++     return true;
++}
++
++
+ // Notify change to KSync entry of InetUnicast Route
+ void VrfKSyncObject::NotifyUcRoute(VrfEntry *vrf, VrfState *state,
+                                    const IpAddress &ip) {
+diff --git a/src/vnsw/agent/vrouter/ksync/route_ksync.h b/src/vnsw/agent/vrouter/ksync/route_ksync.h
+old mode 100644
+new mode 100755
+index b7c1da998..77b0be0da
+--- a/src/vnsw/agent/vrouter/ksync/route_ksync.h
++++ b/src/vnsw/agent/vrouter/ksync/route_ksync.h
+@@ -155,6 +155,7 @@ public:
+     MacAddress GetIpMacBinding(VrfEntry *vrf, const IpAddress &ip) const;
+     void NotifyUcRoute(VrfEntry *vrf, VrfState *state, const IpAddress &ip);
+     bool RouteNeedsMacBinding(const InetUnicastRouteEntry *rt);
++    bool RouteNeedsMacBindingL3Vxlan(const InetUnicastRouteEntry *rt);
+     DBTableBase::ListenerId vrf_listener_id() const {return vrf_listener_id_;}
+ 
