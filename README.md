@@ -22,8 +22,13 @@
 * [Port Mirror Feature](https://github.com/shuqiang/OpenContrail/blob/master/commits/Port%20Mirror%20Feature.diff)
 * [make vgw interface works on dpdk mode](https://github.com/shuqiang/OpenContrail/blob/master/commits/Make%20Vgw%20Work%20On%20DPDK%20Mode.diff)
 
-### evpn:
-
-commit later
+* [L3-Vxlan-Controller](https://github.com/shuqiang/OpenContrail/blob/master/commits/L3-Vxlan-Controller.diff)
+* [L3-Vxlan-Vrouter](https://github.com/shuqiang/OpenContrail/blob/master/commits/L3-Vxlan-Vrouter.diff)
 
 # How to
+
+* [DHCP](https://github.com/shuqiang/OpenContrail/blob/master/DHCP.md)
+
+* [Contrail Config](https://github.com/shuqiang/OpenContrail/blob/master/Contrail-config.md)
+
+* [How to support L3 network functions based on VxLAN](https://github.com/shuqiang/OpenContrail/blob/master/How%20to%20support%20L3%20network%20functions%20based%20on%20VxLAN)
