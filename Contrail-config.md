@@ -2,6 +2,7 @@ The below gives overview of different modules invovlved
 
 # Contrail-Config
 ## The below gives overview of different modules invovlved
+
 '
    +--------------------------------------------------------------------------+
    |                                                                          |
@@ -45,8 +46,9 @@ The below gives overview of different modules invovlved
    |                                                                          |
    +--------------------------------------------------------------------------+
 '
+
 VNC Config Api Server:
----------------------
+
 VNC configure API server manages interaction
 between http/rest, address management, authentication and database interfaces.
 
@@ -76,5 +78,4 @@ between http/rest, address management, authentication and database interfaces.
 ++++++++++++++++++
 
 add virtual network:
--------------------
-REST API----->http/rest----->authentication/keystone----->
+REST API-----http/rest-----authentication/keystone----->
