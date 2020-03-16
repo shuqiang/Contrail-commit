@@ -2,7 +2,7 @@ The below gives overview of different modules invovlved
 
 # Contrail-Config
 ## The below gives overview of different modules invovlved
-
+'
    +--------------------------------------------------------------------------+
    |                                                                          |
    |                                                                          |
@@ -15,9 +15,9 @@ The below gives overview of different modules invovlved
    |    +----------------------+         +-------------v------------+         |         +-------------+
    |    | VirtualNetworkServer |<------->|         http/rest        |<----------------->|  REST API   |
    |    +-----------^----------+         +--------------------------+         |         +-------------+
-   |       ip_alloc |                                                         |
+   |       ip alloc |                                                         |
    |                |                                                         |
-   |                | ip_alloc_req                                            |
+   |                | ip alloc req                                            |
    |    +-----------v----------+                                              |
    |    |       AddrMgmt       |                                              |
    |    +----------------------+                                              |
@@ -44,7 +44,7 @@ The below gives overview of different modules invovlved
    |                                                                          |
    |                                                                          |
    +--------------------------------------------------------------------------+
-
+'
 VNC Config Api Server:
 ---------------------
 VNC configure API server manages interaction
