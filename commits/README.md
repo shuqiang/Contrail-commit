@@ -12,7 +12,6 @@
 
 * [make vgw interface works on dpdk mode](https://github.com/shuqiang/OpenContrail/blob/master/commits/Make%20Vgw%20Work%20On%20DPDK%20Mode.diff)
 
-* [L3-Vxlan-Controller] (https://github.com/shuqiang/OpenContrail/blob/master/commits/L3-Vxlan-Controller.diff)
-* [L3-Vxlan-Vrouter] (https://github.com/shuqiang/OpenContrail/blob/master/commits/L3-Vxlan-Vrouter.diff)
+* [L3-Vxlan-Controller](https://github.com/shuqiang/OpenContrail/blob/master/commits/L3-Vxlan-Controller.diff)
+* [L3-Vxlan-Vrouter](https://github.com/shuqiang/OpenContrail/blob/master/commits/L3-Vxlan-Vrouter.diff)
 
-commit later
