@@ -9,7 +9,6 @@ For example, There are two VMs in two subnet, VM1 ip:192.168.1.10 in subnet1 192
 3, modify the SG allow all the packages to pass.
 3, Ping from VM1 to VM2, then VM1 can't ping to VM2.
 
-
 Why it can't work? 
 In this situation, if select the tunnel type to MPLSoUDP or MPLSoGRE, it can work.
 The Network Policy is a L3 network function in contrail. If VM1 ping VM2, the agent will use Layer 3 route to forward. And the vxlan will encapsulate Layer 2 package.
@@ -19,10 +18,17 @@ How to make it work?
 
 Control plane:
 when the VMI was created, agent add the VMI MAC to export to controller, controller group the two subnets Layer 3 routes together, then publish to the agent who subscrited the subnets.
-  
+1, agent add VMI mac_address to export and make Controller Vm Route for Layer 3 Vxlan
+2, controller aggregate l2 evpn route  
+3, agent add local Vm route to update unicast route table
+4, agent update route_ksync and nh_ksync to vrouter 
+code link: https://github.com/shuqiang/OpenContrail/blob/master/commits/L3-Vxlan-Controller.diff
 
 Data plane:
 Agent will lookfor the route in Layer 3 route table, vrouter add the Inner Ethernet to the package when doing the vxlanencapsulation.
+It's add nh_vxlan_tunnel_helper when nh_vxlan_tunnel_helper.
+code link: https://github.com/shuqiang/OpenContrail/blob/master/commits/L3-Vxlan-Vrouter.diff
+
 The key work is adding Inner Ethernet as we can see from belows package format.
 
 IP over MPLS over GRE package Format:
