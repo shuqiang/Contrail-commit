@@ -1,0 +1,50 @@
+# How to support L3 network functions based on VxLAN
+As we know Contrail enables you to use EVPN-VXLAN when your network includes both virtual and bare-metal devices.
+But based on the V3.2 version, some of the L3 network function such as FloatingIP, Network Policy and Access list can't work if the tunnel type is Vxlan.
+
+For example, There are two VMs in two subnet, VM1 ip:192.168.1.10 in subnet1 192.168.1.1/25, VM2 ip:10.0.0.10 in subnet2 10.0.0.1/25. There are in one tenant.
+
+1, configure the tunnel type to Vxlan and forward model to Default(L2 and L3) by WebUI.
+2, create network policy p1, associate the two subnets to it and allow two networks to communicate.
+3, modify the SG allow all the packages to pass.
+3, Ping from VM1 to VM2, then VM1 can't ping to VM2.
+
+
+Why it can't work? 
+In this situation, if select the tunnel type to MPLSoUDP or MPLSoGRE, it can work.
+The Network Policy is a L3 network function in contrail. If VM1 ping VM2, the agent will use Layer 3 route to forward. And the vxlan will encapsulate Layer 2 package.
+
+
+How to make it work?
+
+Control plane:
+when the VMI was created, agent add the VMI MAC to export to controller, controller group the two subnets Layer 3 routes together, then publish to the agent who subscrited the subnets.
+  
+
+Data plane:
+Agent will lookfor the route in Layer 3 route table, vrouter add the Inner Ethernet to the package when doing the vxlanencapsulation.
+The key work is adding Inner Ethernet as we can see from belows package format.
+
+IP over MPLS over GRE package Format:
+
+ +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+ |                |          |     |      |          |             |
+ + Outer Ethernet + Outer IP + GRE + MPLS + Inner IP + Inner L4-L7 +
+ |                |          |     |      |          |             |
+ +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+ 
+IP over MPLS over UDP package Format:
+
+ +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+ |                |          |     |      |          |             |
+ + Outer Ethernet + Outer IP + UDP + MPLS + Inner IP + Inner L4-L7 +
+ |                |          |     |      |          |             |
+ +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+
+Ethernet over VXLAN package Format:
+
+ +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+ |                |          |     |       |                |          |             |
+ + Outer Ethernet + Outer IP + UDP + VXLAN + Inner Ethernet + Inner IP + Inner L4-L7 +
+ |                |          |     |       |                |          |             |
+ +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
