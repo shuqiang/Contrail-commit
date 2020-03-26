@@ -31,4 +31,4 @@
 
 * [Contrail Config](https://github.com/shuqiang/OpenContrail/blob/master/Contrail-config.readme)
 
-* [How to support L3 network functions based on VxLAN](https://github.com/shuqiang/OpenContrail/blob/master/How%20to%20support%20L3%20network%20functions%20based%20on%20VxLAN)
+* [How to support L3 network functions based on VxLAN](https://github.com/shuqiang/OpenContrail/blob/master/How-to-support-L3-network-functions-based-on-VxLAN.note)
