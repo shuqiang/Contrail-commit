@@ -1,0 +1,199 @@
+
+vhost_dev_xmit linux/vhost_dev.c中定义，vhost初始化的时候已经绑定：vrouter_init-->vr_interface_init-->vhost_init-->vhost_setup
+----vp = netdev_priv(struct net_device *dev) 获取网卡的私有数据地址
+----vifp = vp->vp_vifp 获取vr_interface
+----linux_to_vr(vifp, skb) //vr_interface 获取成功,注意参数: vif,skb, linux/vr_host_interface.c中定义
+    ----pkt = linux_get_packet(skb, vif); //linux skb 转为vrouter pkt
+	----vif->vif_rx  //之前创建VM的时候，VIF_TYPE_VIRTUAL类型的vif，vif->vif_rx = vm_rx
+		----vm_rx //先解vlan(vcenter 适用)，统计此vif vis_ipackets
+			----vr_virtual_input 
+			    ----vr_init_forwarding_md(&fmd); //初始化fmd,之后fmd.fmd_dvrf = vrf; fmd_dvrf是vif 的vrf
+				----vr_pkt_type
+					----如果dstMAC是多播，pkt->vp_flags |= VP_FLAG_MULTICAST
+					----pkt->vp_type = vr_eth_proto_to_pkt_type(eth_proto); //从原始包里取出Eth proto
+				----vr_flow_forward // 第一个pkt 多播，没有vr_do_flow_lookup 直接__vr_flow_forward 
+					----vr_do_flow_lookup
+						----vr_inet_flow_lookup(router, pkt, fmd);
+							----vr_flow_lookup
+								----flow_e = vr_find_flow(router, key, pkt->vp_type,  &fe_index);
+								----flow_e不存在，新建flow entry
+									----vr_flow_allow_new_flow(router, pkt)
+									----flow_e = vr_flow_get_free_entry
+									----vr_flow_entry_set_hold(router, flow_e); //mark as hold
+										----flow_e->fe_action = VR_FLOW_ACTION_HOLD;  //此处状态hold
+								----vr_flow_set_forwarding_md(router, flow_e, fe_index, fmd);
+									//设置flow index, fmd_udp_src_port,以及反向flow rfe = vr_get_flow_entry(router, fe->fe_rflow);
+								----vr_flow_tcp_digest(router, flow_e, pkt, fmd);
+									//TCP 相关的VR_TCP_FLAG_SYN, VR_FLOW_TCP_FIN等
+								----vr_do_flow_action(router, flow_e, fe_index, pkt, fmd);
+									----if (fe->fe_action == VR_FLOW_ACTION_HOLD) {
+											vr_enqueue_flow(router, fe, pkt, index, stats_p, fmd);
+											return FLOW_HELD;
+										}
+										----vr_enqueue_flow 
+											----pnode = &vfq->vfq_pnodes[i];
+											----vr_flow_fill_pnode(pnode, pkt, fmd);  //*****Source IP & Dest IP can change while the packet is in the queue (NAT)
+												----pnode 链表填值
+											----if (!i){ vr_trap_flow(router, fe, pkt, index, stats);}
+												//通过router->vr_agent_if->vif_send(router->vr_agent_if, pkt, &params)发送给agent，pkt0抓包应当可以看到
+												----trap_reason = AGENT_TRAP_FLOW_ACTION_HOLD; 或者AGENT_TRAP_FLOW_MISS
+												----vr_trap(npkt, fe->fe_vrf, trap_reason, &ta);
+													----如果router->vr_agent_if && router->vr_agent_if->vif_send
+														----return router->vr_agent_if->vif_send(router->vr_agent_if, pkt,&params); // 发送给Agent,因为Pkt0创建的时候vif->vif_send = agent_send;只此一例
+									----return vr_flow_action
+										----flow 里面的src_nh->nh_validate_src，src_nh不对的话vr_pfree或vr_trap上送drop原因
+										----如果fe->fe_flags & VR_FLOW_FLAG_VRFT，则更改fmd里面的fmd_dvrf为flow entry 的dst vrf,并且fmd->fmd_to_me = 1
+										----switch (fe->fe_action) 
+											----case VR_FLOW_ACTION_DROP ：		result = FLOW_CONSUMED;
+											----case VR_FLOW_ACTION_FORWARD: 	result = FLOW_FORWARD;
+											----case VR_FLOW_ACTION_NAT:  		result = vr_flow_nat(fe, pkt, fmd);
+												----vr_flow_nat
+													----vr_inet_flow_nat
+														----VR_FLOW_FLAG_SNAT : ip->ip_saddr = rfe->fe_key.flow4_dip; t_sport = rfe->fe_key.flow4_dport;
+														----VR_FLOW_FLAG_DNAT : ip->ip_daddr = rfe->fe_key.flow4_sip; t_dport = rfe->fe_key.flow4_sport;
+														----VR_FLOW_FLAG_VRFT : pkt->vp_nh = vr_inet_ip_lookup
+															----vr_inet_route_lookup(vrf, &rt); //根据ip->ip_daddr去查找rt 里的inet表，获取next hop
+														----return FLOW_FORWARD
+														
+										----if (fe->fe_tcp_flags & VR_FLOW_TCP_DEAD) vr_flow_mark_evict(router, fe, index); // TCP DEAD, flow mark ecict
+											----vr_flow_mark_evict
+												----反向 rflow的 __vr_flow_mark_evict
+												----flow的__vr_flow_mark_evict
+													----flow flag:VR_FLOW_FLAG_EVICT_CANDIDATE
+												----flow的__vr_flow_schedule_transition //*********此处只是追踪调用，正统的调用在vr_flow_schedule_transition里面
+																// ***********由vr_flow_set调用，而vr_flow_set是agent 发送过来的命令
+																// vrouter里的flow 模块运行主函数vr_flow_req_process，如有命令FLOW_OP_FLOW_SET，则进入vr_flow_set
+																
+													----vr_schedule_work(vr_get_cpu(), vr_flow_work, (void *)flmd);
+														----根据cpu分配work 进行vr_flow_work
+															----vr_flow_work
+																----__vr_flow_work
+																	----vr_init_forwarding_md(&fmd);
+																	----vr_flow_set_forwarding_md(router, fe, flmd->flmd_index, &fmd);
+																	----vr_flush_entry(router, fe, flmd, &fmd);
+																		----__vr_flow_flush_hold_queue(router, fe, fmd, vfq);
+																			----vr_flow_flush_pnode(router, pnode, fe, fmd);
+																				----获取vif，vif = __vrouter_get_interface
+																				----判断pkt->vp_nh，如果vif_is_fabric，不是vr_forwarding_md_label_is_vxlan_id，则pkt->vp_nh = __vrouter_get_label
+																				----如果flow entry存在
+																					----result = vr_flow_action(router, fe, fmd->fmd_flow_index, pkt, fmd);
+																					----forward = __vr_flow_forward(result, pkt, fmd);
+																				----flow entry不存在
+																					----forward = vr_flow_forward(router, pkt, fmd);
+																				----如果forward，vr_reinject_packet(pkt, fmd);
+																					----vr_reinject_packet(pkt, fmd);************************************
+																	----vr_flow_defer(flmd, fe);
+																		----vr_defer(flmd->flmd_router, vr_flow_defer_cb, (void *)vdd);
+																			----vr_flow_defer_cb
+																				----vr_flow_flush_hold_queue(router, fe, vfq); //以下步骤见上边，
+																					---- vr_init_forwarding_md(&fmd);
+																					----vr_flow_set_forwarding_md(router, fe, vfq->vfq_index, &fmd);
+																					----__vr_flow_flush_hold_queue(router, fe, &fmd, vfq);
+												----不行再vr_flow_reset_evict
+										----return result
+											
+								
+					----__vr_flow_forward // 根据上面vr_do_flow_lookup 结果,返回是否forward,bool型
+                                        // pkt多播的话，使用初始化的result=FLOW_FORWARD
+						----case FLOW_FORWARD:  forward = true;
+						----case FLOW_TRAP:   vr_trap(pkt, fmd->fmd_dvrf, AGENT_TRAP_L3_PROTOCOLS, NULL);
+						----case FLOW_EVICT_DROP:        vr_pfree(pkt, VP_DROP_FLOW_EVICT);
+						----case FLOW_HELD:  break;
+						----case FLOW_CONSUMED:  break;     
+						----case FLOW_DROP: vr_pfree
+				
+				
+				----vr_bridge_input  dmac: ff:ff:ff:ff:ff:ff // 第一条pkt vr_flow_forward返回值true, 没有return 0, 往这走。arp 组播往下走，如果是arp完成之后，ping包不往这走
+                    ----vif_is_virtual(pkt->vp_if) ，vr_ip_well_known_packet
+                        ----返回L4_TYPE_UNKNOWN或L4_TYPE_DHCP_REQUEST
+                    ----nh = vr_bridge_lookup(fmd->fmd_dvrf, &rt);
+                        因为bridge_table_init中vr_bridge_lookup = bridge_table_lookup;
+                        ----bridge_table_lookup
+                    ----if ipv4 and fmd to me, handled = vr_l3_input(pkt, fmd);
+                    ---- nh_output(pkt, nh, fmd);
+				
+				
+				
+vrouter里的flow 模块：
+vr_flow_req_process：
+	----case FLOW_OP_FLOW_TABLE_GET: 获取flow table(常用flow -l 可获取flow table)
+	----case FLOW_OP_FLOW_SET:vr_flow_set
+		----fe = vr_get_flow_entry(router, req->fr_index);
+		----fe 不存在的话 fe = vr_add_flow_req(req, &fe_index);
+			----vr_inet_fill_flow //填充flow entry字段
+			----fe = vr_add_flow
+				----如果已有vr_find_flow 返回null
+				----flow_e = vr_flow_get_free_entry(router, key, type, need_hold_queue, fe_index);
+				
+		----vr_flow_update_link_local_port(router, req, fe);// 设置link local port,VR_FLOW_FLAG_LINK_LOCAL
+		
+		----vr_flow_udp_src_port(router, fe);// 设置flow里面udp 范围：
+			----VR_MUDP_PORT_RANGE_END - VR_MUDP_PORT_RANGE_START
+				//49152~~》65535 
+				//注意vxlan :VR_VXLAN_UDP_DST_PORT :4789; VR_VXLAN_UDP_SRC_PORT       52000
+
+		
+		----vr_flow_schedule_transition(router, req, fe);		
+			----__vr_flow_schedule_transition 																
+				----vr_schedule_work(vr_get_cpu(), vr_flow_work, (void *)flmd);
+					----根据cpu分配work 进行vr_flow_work
+						----vr_flow_work
+							----__vr_flow_work
+								----vr_init_forwarding_md(&fmd);
+								----vr_flow_set_forwarding_md(router, fe, flmd->flmd_index, &fmd);
+								----vr_flush_entry(router, fe, flmd, &fmd);
+									----__vr_flow_flush_hold_queue(router, fe, fmd, vfq);
+										----vr_flow_flush_pnode(router, pnode, fe, fmd);
+											----获取vif，vif = __vrouter_get_interface
+											----判断pkt->vp_nh，如果vif_is_fabric，不是vr_forwarding_md_label_is_vxlan_id，则pkt->vp_nh = __vrouter_get_label
+											----如果flow entry存在
+												----result = vr_flow_action(router, fe, fmd->fmd_flow_index, pkt, fmd);
+												----forward = __vr_flow_forward(result, pkt, fmd);
+											----flow entry不存在
+												----forward = vr_flow_forward(router, pkt, fmd);
+											----如果forward，vr_reinject_packet(pkt, fmd);
+												----vr_reinject_packet(pkt, fmd);************************************
+													----从flow 转入pkt处理
+													----
+												
+								----vr_flow_defer(flmd, fe);
+									----vr_defer(flmd->flmd_router, vr_flow_defer_cb, (void *)vdd);
+										----vr_flow_defer_cb
+											----vr_flow_flush_hold_queue(router, fe, vfq); //以下步骤见上边，
+												---- vr_init_forwarding_md(&fmd);
+												----vr_flow_set_forwarding_md(router, fe, vfq->vfq_index, &fmd);
+												----__vr_flow_flush_hold_queue(router, fe, &fmd, vfq);
+												
+												
+simple:
+vr_flow_forward(router, pkt, fmd) //根据流表转发
+	----result = vr_do_flow_lookup(router, pkt, fmd);
+		----result = vr_inet_flow_lookup(router, pkt, fmd); //pkt->vp_type == VP_TYPE_IP
+			----ret = vr_inet_form_flow(router, fmd->fmd_dvrf, pkt, fmd->fmd_vlan, flow_p); //填充出一个vr_flow只有简单的proto;nh_id;sport;dport;AF_INET; 留待后续匹配真正的flow_entry用？
+						//注意是填充到flow_p里面的
+				---- return ret = vr_inet_proto_flow(router, vrf, pkt, vlan, ip, flow_p);//填写ICMP port
+					----nh_id = vr_inet_flow_nexthop(pkt, vlan); //nh_id = pkt->vp_if->vif_nh_id; 从pkt vif 获取nh_id
+					----vr_inet_fill_flow(flow_p, nh_id, (unsigned char *)&ip->ip_saddr,ip->ip_proto, sport, dport);//填充vr_flow：proto;nh_id;sport;dport;AF_INET;
+			----return vr_flow_lookup(router, flow_p, pkt, fmd); //根据上面填充的flow_p 去匹配，
+				----flow_e = vr_find_flow(router, key, pkt->vp_type,  &fe_index); //根据上面的key=flow_p去flow entry的table里查找，获取entry并且index写入fe_index
+				----vr_flow_set_forwarding_md(router, flow_e, fe_index, fmd);//fmd_flow_index设置为flow entry的index；设置fmd_ecmp_nh_index及fmd_udp_src_port 
+				----vr_flow_tcp_digest(router, flow_e, pkt, fmd);//TCP设置以及rflow_e
+				----return vr_do_flow_action(router, flow_e, fe_index, pkt, fmd);//做flow的转发
+					----如果fe->fe_action == VR_FLOW_ACTION_HOLD则vr_enqueue_flow(router, fe, pkt, index, stats_p, fmd);并返回FLOW_HELD
+						----vr_flow_fill_pnode(pnode, pkt, fmd);//根据fmd及pkt IP 填充到vr_packet_node *pnode ,留待后续rejenact用
+					----return vr_flow_action(router, fe, index, pkt, fmd);
+						----src_nh = __vrouter_get_nexthop(router, fe->fe_src_nh_index); //根据flow entry fe->fe_src_nh_index获取nh
+						----valid_src = src_nh->nh_validate_src(pkt, src_nh, fmd, NULL); // 根据nh处理不同！！！44，valid，policy,
+						----if (fe->fe_flags & VR_FLOW_FLAG_VRFT)： fmd->fmd_dvrf = fe->fe_dvrf; fmd->fmd_to_me = 1;
+						----case VR_FLOW_ACTION_NAT:        result = vr_flow_nat(fe, pkt, fmd); //NAT
+							---- return vr_inet_flow_nat(fe, pkt, fmd);
+								----if ((fe->fe_flags & VR_FLOW_FLAG_VRFT) && pkt->vp_nh && ((pkt->vp_nh->nh_vrf != fmd->fmd_dvrf) || (pkt->vp_nh->nh_flags & NH_FLAG_ROUTE_LOOKUP))) 
+									----pkt->vp_nh = vr_inet_ip_lookup(fmd->fmd_dvrf, ip->ip_daddr); //再次查找inet表！！！！
+						----return result // 没有NAT直接返回
+						
+	----return __vr_flow_forward(result, pkt, fmd);
+		----case FLOW_FORWARD: return true
+		----case FLOW_TRAP: vr_trap(pkt, fmd->fmd_dvrf, AGENT_TRAP_L3_PROTOCOLS, NULL);
+
+
+

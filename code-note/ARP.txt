@@ -1,0 +1,131 @@
+---------------------------------------------------		
+从内到外是 Flood, 外到内是ARP Forward		
+https://github.com/Juniper/contrail-controller/wiki/Contrail-VRouter-ARP-Processing
+
+---------------------------------------------------
+VM --send arp--> Vrouter
+---------------------------------------------------
+
+    Do Inet route lookup for the IP Destination
+    If Route found for the IP Destination
+        If Proxy Flag set in the route
+            If MAC Stitching information present in the route
+                Send ARP Respone with the MAC present in stitching information
+            Else // MAC Stitching not found
+                If Flood Flag set in the route
+                    Flood the ARP packet
+                Else // PROXY set, No-Flood, No-MAC Stitching
+                    Send ARP response with VRouter MAC address
+        Else // Proxy Flag not set
+            If Flood flag set in the Route
+                Flood the ARP packet
+            Else // Proxy Not set, Flood not set
+                Drop the packet
+    Else // Route not found
+        Flood the ARP
+
+---------------------------------------------------		
+fabric network ---arp---> Vrouter
+---------------------------------------------------
+Do Inet route lookup for the IP Destination
+If Route found for the IP Destination
+    If Proxy Flag set in the route
+        If Route points to a local interface
+            If MAC Stitching information present
+                Send ARP Response with the stitched MAC
+            Else
+                If Flood flag set
+                    Forward the ARP packet
+                Else
+                    Send ARP response with VRouter MAC address
+        Else // Route does not point to local interface
+            Forward the ARP packet
+    Else // Proxy Flag not set
+        Forward the ARP packet
+---------------------------------------------------
+ARP:
+1> 第一条组播：
+----vm_rx 
+	----vr_virtual_input 
+		----vr_pkt_type
+		----vr_flow_forward // arp reply之后第一条ping包 进入此函数
+			
+		----vr_bridge_input  dmac: ff:ff:ff:ff:ff:ff
+			根据dmac ff:ff:ff:ff:ff:ff 从vr_bridge_lookup获取对应的nh
+				[root@node-23 log]# rt --dump 4 --family bridge
+				Flags: L=Label Valid, Df=DHCP flood
+				vRouter bridge table 0/4
+				Index       DestMac                  Flags           Label/VNID      Nexthop
+				4768        ec:f4:bb:d3:79:aa          Df                 -             3
+				31992       2:ed:7d:67:87:8a          LDf                 7            23
+				134148      2:ae:8:73:b5:69                               -            31
+				196364      0:0:5e:0:1:0               Df                 -             3
+				206596      ff:ff:ff:ff:ff:ff         LDf                 7            53
+				256468      2:fd:91:c0:d0:4f          LDf                 7            23
+			对应的nh 53
+			[root@node-23 log]# nh --get 53
+			Id:53         	Type:Composite      Fmly:AF_BRIDGE  Rid:0  Ref_cnt:4          Vrf:4
+							Flags:Valid, Multicast, L2, 
+							Sub NH(label): 52(0) 46(0)
+							
+	
+			----nh_output  nh type:6 id:53
+				会判断是不是已经生成flow，需要不需要flow look up,
+				----nh->nh_reach_nh //nh flags不同，处理不同
+					NH_FLAG_COMPOSITE_L2:
+							nh->nh_reach_nh = nh_composite_mcast_l2;
+							nh->nh_validate_src = nh_composite_mcast_validate_src;
+					NH_FLAG_COMPOSITE_ECMP
+							nh->nh_reach_nh = nh_composite_ecmp;
+							nh->nh_validate_src = nh_composite_ecmp_validate_src;
+					NH_FLAG_COMPOSITE_FABRIC
+							nh->nh_reach_nh = nh_composite_fabric;
+					NH_FLAG_COMPOSITE_EVPN
+							nh->nh_reach_nh = nh_composite_evpn;
+					NH_FLAG_COMPOSITE_ENCAP
+							nh->nh_reach_nh = nh_composite_encap;
+					NH_FLAG_COMPOSITE_TOR
+							nh->nh_reach_nh = nh_composite_tor;
+							
+					----nh_composite_mcast_l2  nh type:6 id:53  //注意之前获取的nh flags: Valid, Multicast, L2,
+						----nh_handle_mcast_control_pkt  fmd_label:7 dvrf:4
+							----handled = vr_arp_input(pkt, fmd, eth_dmac);
+								----vr_arp_input
+									----case VR_ARP_OP_REQUEST:
+										return vr_handle_arp_request(&sarp, pkt, fmd, eth_dmac);
+										----arp_result = vif->vif_mac_request(vif, pkt, fmd, dmac); // 不同vif发出的arp,处理不同
+											// vhost_mac_request，vm_mac_request，eth_mac_request
+											----vm_mac_request
+												----vm_arp_request(vif, pkt, fmd, dmac);
+												
+										----switch (arp_result) {
+											case MR_PROXY:
+												vr_arp_proxy(sarp, pkt, fmd, dmac);
+												----
+												----vr_mac_reply_send(pkt, fmd);
+													----
+													----if (vif_tx)
+														vif->vif_tx(vif, pkt, &fmd_new);
+													----else
+														nh_output(pkt, nh, &fmd_new);
+												
+												
+											case MR_XCONNECT:
+												vif_xconnect(pkt->vp_if, pkt, fmd);       
+											case MR_TRAP_X:        
+												vif_xconnect(pkt->vp_if, pkt_c, fmd);
+											case MR_MIRROR:     
+												vr_trap(pkt_c, fmd->fmd_dvrf, AGENT_TRAP_ARP, NULL);
+											case MR_DROP:
+												vr_pfree(pkt, VP_DROP_INVALID_ARP);
+											case MR_FLOOD:
+        
+
+									----case VR_ARP_OP_REPLY:
+									return vr_handle_arp_reply(&sarp, pkt, fmd);
+	
+	
+vr_printf("vrouter:  7 eth_dmac: %02x:%02x:%02x:%02x:%02x:%02x\n", eth_dmac[0],eth_dmac[1],eth_dmac[2],eth_dmac[3],eth_dmac[4],eth_dmac[5]);
+vr_printf("vrouter: +++ nh_composite_mcast_l2  nh type:%d id:%d\n", nh->nh_type,nh->nh_id);
+vr_printf("vrouter: ++++ pkt sarp->arp_dha: %02x:%02x:%02x:%02x:%02x:%02x\n", sarp->arp_dha[0],sarp->arp_dha[1],sarp->arp_dha[2],sarp->arp_dha[3],sarp->arp_dha[4],sarp->arp_dha[5]);	
+vr_printf("vrouter: ------------1----------- rt->rtr_req.rtr_index:%d\n", rt->rtr_req.rtr_index);	
