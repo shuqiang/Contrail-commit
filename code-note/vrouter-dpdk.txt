@@ -1,0 +1,188 @@
+dpdk_vrouter：
+main(int argc, char *argv[])
+    /* init DPDK first since vRouter uses DPDK mallocs and logs */
+    ----dpdk_init()
+		----vr_dpdk_flow_mem_init()
+		----dpdk_argv_update()
+		----rte_eal_init(ret, dpdk_argv)
+		
+		----rte_openlog_stream(timestamp_log_stream);
+		----rte_set_log_type(VR_DPDK_LOGTYPE_DISABLE, 0);
+		----rte_set_log_level(RTE_LOG_INFO);
+		
+		----dpdk_mempools_create(); //***********************
+		----nb_sys_ports = rte_eth_dev_count();
+		----rte_timer_subsystem_init();
+		----dpdk_check_sriov_vf();
+		
+		----return pthread_mutex_init(&vr_dpdk.if_lock, NULL);
+   
+
+    /* associate signal hanlder with signals */
+    ----dpdk_signals_init();
+   
+
+    /* init the vRouter */
+    ----vr_dpdk_host_init();
+		----vrouter_host = vrouter_get_host();
+			----return &dpdk_host; // 
+		----vr_dpdk_flow_init()
+			----vr_flow_table = vr_dpdk.flow_table;
+			----vr_oflow_table = vr_dpdk.flow_table + VR_FLOW_TABLE_SIZE;
+		----//Turn off GRO/GSO as they are not implemented with DPDK.
+		----vr_dpdk_set_fd_limit()
+		
+		----vrouter_init();
+			---- module_under_init = &modules[i];
+			---- ret = modules[i].init(&router); //不同modules自己的init
+		----vr_sandesh_init();
+			----vr_message_proto_register(&sandesh_mproto);
+
+  
+
+    /* Init fragment assembler */
+    ----dpdk_fragment_assembler_init();
+		----dpdk_fragment_queue_init()
+		----dpdk_assembler_table_init()
+    
+
+    /* Create VLAN forwarding interface if needed. */
+    if (vr_dpdk.vlan_tag != VLAN_ID_INVALID) {
+        dpdk_vlan_forwarding_if_add();
+		---- vr_dpdk_knidev_init(0, &vlan_fwd_intf);
+		----vr_dpdk.vlan_kni = (struct rte_kni *)vlan_fwd_intf.vif_os; //*****************
+		----vr_dpdk.vlan_ring = vr_dpdk_ring_allocate(VR_DPDK_FWD_LCORE_ID, vr_dpdk.vlan_name, VR_DPDK_TX_RING_SZ, RING_F_SC_DEQ)
+        
+    }
+
+    /******* run all the lcores *******/
+    ----rte_eal_mp_remote_launch(vr_dpdk_lcore_launch, NULL, CALL_MASTER);
+		----vr_dpdk_lcore_launch
+			----dpdk_lcore_init
+				----lcore = rte_zmalloc_socket("vr_dpdk_lcore", sizeof(struct vr_dpdk_lcore), RTE_CACHE_LINE_SIZE,  rte_lcore_to_socket_id(lcore_id));
+				----SLIST_INIT(&lcore->lcore_tx_head);
+				----if (lcore_id >= VR_DPDK_IO_LCORE_ID && lcore_id <= VR_DPDK_LAST_IO_LCORE_ID) {
+					----ret = dpdk_lcore_io_init(lcore_id, lcore);  
+						----LOG: IO lcore %u: distributing all packets to [%s]\n
+				----else if (lcore_id >= VR_DPDK_FWD_LCORE_ID) {
+					----ret = dpdk_lcore_fwd_init(lcore_id, lcore);
+						----dpdk_lcore_fwd_dsts_init(lcore_id, lcore); // MPLSoGRE.?
+							----LOG: Lcore %u: distributing all packets to [%s]\n"
+				----rcu_register_thread();
+				----dpdk_lcore_signals_init(lcore_id);
+
+			----switch (lcore_id) // lcore 分布：0 kni;1 timer; 2 uvhost; 8 packet; 9 netlink
+								// 3,4,5,6,7  IO ; >= 10 fwd
+				----case VR_DPDK_KNI_LCORE_ID:
+					dpdk_lcore_kni_loop();
+				----case VR_DPDK_TIMER_LCORE_ID:
+					dpdk_lcore_timer_loop();
+				
+				----case VR_DPDK_UVHOST_LCORE_ID:
+					dpdk_lcore_uvhost_loop();
+				
+				----case VR_DPDK_PACKET_LCORE_ID:
+					dpdk_lcore_packet_loop();
+			
+				----case VR_DPDK_NETLINK_LCORE_ID:
+					dpdk_lcore_netlink_loop();
+			
+				----default:
+					if (lcore_id >= VR_DPDK_IO_LCORE_ID && lcore_id <= VR_DPDK_LAST_IO_LCORE_ID) {
+						dpdk_lcore_io_loop();
+					else if (lcore_id >= VR_DPDK_FWD_LCORE_ID) {
+						dpdk_lcore_fwd_loop();
+						---- while(1)
+						----if (lcore_id == vr_dpdk.vf_lcore_id)
+							dpdk_lcore_sriov_rxtx(lcore);
+						----else
+							dpdk_lcore_fwd_rxtx(lcore);
+							----total_pkts += dpdk_lcore_rxqs_vroute(lcore); //receive packets from RX queues and pass them to dp-core.
+								----
+							----total_pkts += dpdk_lcore_rx_ring_vroute(lcore, lcore->lcore_rx_ring); //Forwarding lcore RX ring handling
+								----
+							----total_pkts += dpdk_lcore_tx_rings_push(lcore); ///* Forwarding lcore push TX rings */
+								----rtp->rtp_tx_queue->txq_ops.f_tx(rtp->rtp_tx_queue->q_queue_h, pkts[i]); // f_tx = dpdk_knidev_writer_tx,或者.f_tx = dpdk_virtio_to_vm_tx,
+									----.f_tx = dpdk_virtio_to_vm_tx, //sends a packet from vrouter to a virtio client(VM)
+										----DPDK_VIRTIO_WRITER_STATS_PKTS_IN_ADD(p, 1);// 填写Port 统计pkts 信息，vif --l 可见
+										----dpdk_virtio_send_burst
+											----nb_tx = dpdk_virtio_dev_to_vm_tx_burst(p, p->tx_virtioq, p->tx_buf, p->tx_buf_count); //******************
+												----
+											----DPDK_VIRTIO_WRITER_STATS_PKTS_DROP_ADD(p, p->tx_buf_count - nb_tx); //写入port drop pkts个数
+									
+							----dpdk_lcore_vlan_fwd(lcore);
+				
+				
+				
+    ----rte_eal_mp_wait_lcore();
+	
+    RTE_LCORE_FOREACH_SLAVE(lcore_id)
+		dpdk_lcore_exit(lcore_id);
+		
+    dpdk_fragment_assembler_exit();
+    dpdk_netlink_exit();
+    vr_dpdk_host_exit();
+    dpdk_exit();
+
+    rte_exit(ret, "vRouter/DPDK is stopped.\n");
+	
+	
+	
+	
+	
+----------------------------------------------------------
+struct host_os dpdk_host = {
+    .hos_printf                     =    dpdk_printf,
+    .hos_malloc                     =    dpdk_malloc,
+    .hos_zalloc                     =    dpdk_zalloc,
+    .hos_free                       =    dpdk_free,
+    .hos_vtop                       =    dpdk_vtop, /* not used */
+    .hos_page_alloc                 =    dpdk_page_alloc,
+    .hos_page_free                  =    dpdk_page_free,
+
+    .hos_palloc                     =    dpdk_palloc,
+    .hos_palloc_head                =    dpdk_palloc_head, /* not implemented */
+    .hos_pexpand_head               =    dpdk_pexpand_head, /* not implemented */
+    .hos_pfree                      =    dpdk_pfree,
+    .hos_preset                     =    dpdk_preset,
+    .hos_pclone                     =    dpdk_pclone,
+    .hos_pcopy                      =    dpdk_pcopy,
+    .hos_pfrag_len                  =    dpdk_pfrag_len,
+    .hos_phead_len                  =    dpdk_phead_len,
+    .hos_pset_data                  =    dpdk_pset_data,
+    .hos_pgso_size                  =    dpdk_pgso_size, /* not implemented, returns 0 */
+
+    .hos_get_cpu                    =    dpdk_get_cpu,
+    .hos_schedule_work              =    dpdk_schedule_work,
+    .hos_delay_op                   =    dpdk_delay_op, /* do nothing */
+    .hos_defer                      =    dpdk_defer,
+    .hos_get_defer_data             =    dpdk_get_defer_data,
+    .hos_put_defer_data             =    dpdk_put_defer_data,
+    .hos_get_time                   =    dpdk_get_time,
+    .hos_get_mono_time              =    dpdk_get_mono_time,
+    .hos_create_timer               =    dpdk_create_timer,
+    .hos_delete_timer               =    dpdk_delete_timer,
+
+    .hos_network_header             =    dpdk_network_header, /* for chains? */
+    .hos_inner_network_header       =    dpdk_inner_network_header, /* not used? */
+    .hos_data_at_offset             =    dpdk_data_at_offset, /* for chains? */
+    .hos_pheader_pointer            =    dpdk_pheader_pointer,
+    .hos_pull_inner_headers         =    NULL,  /* not necessary */
+    .hos_pcow                       =    dpdk_pcow,
+    .hos_pull_inner_headers_fast    =    NULL,  /* not necessary */
+#if VR_DPDK_USE_MPLS_UDP_ECMP
+    .hos_get_udp_src_port           =    dpdk_get_udp_src_port,
+#endif
+    .hos_pkt_from_vm_tcp_mss_adj    =    dpdk_pkt_from_vm_tcp_mss_adj,
+    .hos_pkt_may_pull               =    dpdk_pkt_may_pull,
+
+    .hos_add_mpls                   =    dpdk_add_mpls,
+    .hos_del_mpls                   =    dpdk_del_mpls, /* not implemented */
+    .hos_enqueue_to_assembler       =    dpdk_fragment_assembler_enqueue,
+    .hos_set_log_level              =    dpdk_set_log_level,
+    .hos_set_log_type               =    dpdk_set_log_type,
+    .hos_get_log_level              =    dpdk_get_log_level,
+    .hos_get_enabled_log_types      =    dpdk_get_enabled_log_types,
+    .hos_soft_reset                 =    dpdk_soft_reset,
+    .hos_is_frag_limit_exceeded     =    dpdk_is_frag_limit_exceeded,
+};
