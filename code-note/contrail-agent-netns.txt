@@ -1,0 +1,42 @@
+contrail vrouter agent 传过来的命令如下：
+/usr/bin/opencontrail-vrouter-netns 
+create source-nat b137233c-a2c8-4904-8355-75b676e49ff0 155493e7-fd55-415d-97f8-8a205b04950a 8987e6c0-5d86-4cb5-911a-19dcf5c7e970 
+--vmi-left-ip 100.64.0.4/29 --vmi-right-ip 172.16.119.181/29 
+--vmi-left-mac 02:94:1f:45:59:4a --vmi-right-mac 02:26:32:e9:1d:7d 
+--gw-ip 100.64.0.6
+
+vrouter_netns.py:
+	----main(args_str=None):
+		----vrouter_netns = VRouterNetns(args_str)
+			//解析参数 func=create, SERVICE_TYPES=source-nat
+			----create_parser.set_defaults(func=self.create)
+		----vrouter_netns.args.func()
+			----VRouterNetns::create
+				----校验uuid是否合法,设置nic_left[] ip/mac, nic_right[] ip/mac
+				----netns_mgr = NetnsManager(netns_name....) 传参给NetnsManager
+				----if netns 已经存在，删除netns
+				----netns_mgr::create
+					----_create_interfaces(ip, nic)
+						----root_dev, ns_dev = ip.add_veth
+							----调用ip link  'add', name1, 'type', 'veth', 'peer', 'name', name2
+								// add', 'veth431360e8-d', 'type', 'veth', 'peer', 'name', 'int-431360e8-d', 'netns', 'vrouter-d828c41c-e8bf-42ee-865d-c7000e2ed37d'
+							----ns_dev.link.set_address(str(nic['mac']))
+							----ns_dev.link.set_up(),root_dev.link.set_up()
+							----ns_dev.addr.add(ip.version, str(ip), str(ip.broadcast))
+							----# disable reverse path filtering
+							     self.ip_ns.netns.execute(['sysctl', '-w','net.ipv4.conf.%s.rp_filter=2' % nic['name']]) 
+				----if service_type is source-nat
+					----netns_mgr.set_snat()
+						----'sysctl', '-w', 'net.ipv4.ip_forward=1']
+						----iptables', '-t', 'nat', '-F'
+						----添加ip route, ip rule
+				----if service_type is loadbalance
+					----netns_mgr.set_lbaas()
+				----netns_mgr.plug_namespace_interface()
+					----_add_port_to_agent(nic, display_name='NetNS-%s-%s-interface' % (self.vm_uuid, nic['name']))
+						----payload = {"ip-address": str(nic['ip'].ip), "tx-vlan-id": -1,"display-name": display_name, "id": nic['uuid'],
+							"instance-id": self.vm_uuid, "ip6-address": '',"rx-vlan-id": -1,"system-name": self._get_tap_name(nic['uuid']), "vn-id": '', "vm-project-id": '',
+							"type": port_type_value, "mac-address": str(nic['mac'])}
+						----json_dump = json.dumps(payload)
+						----requests.post(self.BASE_URL, data=json_dump, headers=self.HEADERS)
+							// BASE_URL = "http://localhost:9091/port"

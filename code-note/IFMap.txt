@@ -1,0 +1,133 @@
+控制节点侧 IFMap：
+
+环境相关：
+/etc/init.d/supervisor-config 调用 /etc/contrail/supervisord_config_files 里面的ifmap.ini
+ifmap.ini内容调用/usr/bin/ifmap-server
+/usr/bin/ifmap-server执行的动作是 cd /usr/share/ifmap-server， 起一个java程序
+内容在/usr/share/ifmap-server 里面irond.jar
+irond.jar内有main.class等
+启动之后ifmap-server
+
+supervisor-control里面的control和dns在启动之前要求ifmap-server启动正常
+其代码main函数里有描述既 IFMapServer ifmap_server(&config_db, &config_graph, evm.io_service());
+
+http://172.16.161.203:8083/ifmap_server_show.xml 显示controller ifmap server相关调试信息
+http://172.16.161.203:8083/Snh_SandeshTraceRequest?x=IFMapTraceBuf  IFMap trace
+
+    ----IFMapServer 构造，
+	    db_(db),
+		graph_(graph),
+		io_service_(io_service),
+		ifmap_manager_(NULL) （后面设定）, ifmap_channel_manager_(NULL) 
+		
+	    queue_(new IFMapUpdateQueue(this)),
+			----typedef boost::intrusive::list<IFMapListEntry, MemberHook> List; list_后面添加 IFMapMarker tail_marker_;
+			----主要是enum EntryType {UPDATE // add or change operation； DELETE,// delete；   MARKER };三种状态
+			
+		exporter_(new IFMapExporter(this)),,
+			----将正确的entry加入update queue,遍历GraphWalker,计算client订阅的集合，并确保已订阅的client可以看到其期望的值。
+				会强制排序,link 添加之前，保证node已添加。node 删除必须在link删除之后.
+				
+		sender_(new IFMapUpdateSender(this, queue())),
+			----Sender 发送，发送队列
+			
+		vm_uuid_mapper_(new IFMapVmUuidMapper(db_, this)),
+			----Store [vm-uuid, vr-name] from the vm-reg request 从vm-reg-request获取
+				---- ADD: vm-reg-request, DELETE: vm-node add/xmpp-not-ready
+			----Store [vm-node, vm-uuid]
+				----ADD: config vm-node add, DELETE: config vm-node delete
+			
+		work_queue_(IFMapServer::ClientWorker), 
+			----IFMapServer::ClientWorker
+				----IFMapServer::ProcessClientWork
+					----add: 
+						----ClientRegister(client); // http://172.16.161.203:8083/Snh_IFMapServerClientShowReq? 可以看到IFMap client
+						
+							----client_map_, index_map_ 插入IFMapClient IFMapClient基本上是和VM添加删除强相关
+								因为Contrail vrouter agent 只订阅本计算节点上的"virtual-machines"相关的信息，故关键点是要有VM list而不是其他
+								
+							----client Initialize; IFMapUpdateQueue->Join (marker_map_.insert) client加入marker尾部，接收更新
+							
+						----ClientExporterSetup(client);
+							----exporter_->AddClientConfigTracker(client->index());
+								----client_config_tracker_[index] = new ConfigSet();  // client_config_tracker_ 是std::vector<ConfigSet *> 
+									----boost::unordered_set<IFMapState *> ConfigSet
+										----IFMapState
+											----BitSet interest_;  // The set of clients known to be interested in this update
+											----BitSet advertised_;  // The set of clients to which this update has been advertised.
+											----UpdateList update_list_; //typedef boost::intrusive::slist<IFMapUpdate, MemberHook> UpdateList;
+												----class IFMapUpdate : public IFMapListEntry 
+								
+								
+						----ClientGraphDownload(client);
+							----find "__ifmap_virtual_router.0" IFMApTable 搜出所有的vrouter，结果类似：virtual-router:default-global-system-config:vgw
+							----IFMapNode *node = table->FindNode(client->identifier()); 根据client->identifier())从所有的vrouter中找出对应的vrouter
+							
+							----如果exporter_->FilterNeighbor(node, adj) 则continue; 否则 步骤如下 
+							
+							----DBTable *link_table = static_cast<DBTable *>(db_->FindTable("__ifmap_metadata__.0")); 
+								// 之前 IFMapLinkTable::CreateTable(db, "__ifmap_metadata__.0", graph);有创建
+							----link_table->Change(edge); // <node, adj>这条边有变化
+								----DBTablePartBase::Notify
+									----加入change_list 尾部， change_list不为空，
+										----DBPartition::OnTableChange
+											----work_queue_->SetActive(
+												---- DBPartition::WorkQueue::MaybeStartRunner() 
+													----scheduler->Enqueue(runner);
+							
+					----not add:
+						----RemoveSelfAddedLinksAndObjects(client);
+						----CleanupUuidMapper(client);
+						----ClientExporterCleanup(client);
+						----ClientUnregister(client);
+						
+		
+必须给已经启动的 ifmap_server指定的DB，graph, IO
+第二步IFMap_Initialize(&ifmap_server);
+	----IFMap_Initialize（&ifmap_server）
+	    ----IFMapLinkTable_Init(); // 新建link 表
+			----table=IFMapLinkTable::CreateTable(db, "__ifmap_metadata__.0", graph);
+				----IFMapLinkTable *table = new IFMapLinkTable(db, name, graph);
+				----table->Init();
+					----AllocPartition()
+			----db->AddTable(table);
+			
+	    ----IFMapServerParser::GetInstance("vnc_cfg");
+		
+	    ----vnc_cfg_ParserInit(parser);
+		
+	    ----vnc_cfg_Server_ModuleInit();
+	    ----bgp_schema_ParserInit(parser);
+	    ----bgp_schema_Server_ModuleInit();
+	    ----IFMapServer->Initialize();
+            ----IFMapExporter::Initialize
+	            ----DBTableBase::Register(NodeTableExport) 
+				    ----IFMapExporter::NodeTableExport：
+					    ----UpdateAddChange
+						    ----sender()->QueueActive(); sender(IFMapUpdateSender), QueueActive: SendTask
+							    *** scheduler->Enqueue(send_task);
+								sender_->Send(sender_->queue_->tail_marker()/GetMarker(i)); IFMapUpdateQueue的GetMarker/tail_marker
+								
+	        	----TableMap.insert
+	        	----DBTableBase::Register(LinkTableExport)
+	        	----TableMap.insert
+	        	----new IFMapGraphWalker
+	        	    ----AddNodesToWhitelist();
+	        		----AddLinksToWhitelist();
+	        		
+	        ----IFMapVmUuidMapper::Initialize
+	            ----IFMapVmUuidMapper::VmNodeProcess
+	        	    ----IFMapVmUuidMapper::NodeProcessed ()NodeUuidMap找得到此IFMapNode为真，找不到假).
+	        		----IFMapObject *object = vm_node->Find(IFMapOrigin(IFMapOrigin::MAP_SERVER))：从ObjectList里面查找IFMapObject。
+	        		    IFMapNode::ObjectList存放所有IFMapObject的链表。
+	        		----IFMapUuidMapper (Maintains a mapping of [uuid, node]) add vm_node(get from object)
+	        		----NodeUuidMap [node, uuid] add (vm_node, vm_uuid)
+	        		----如果PendingVmRegMap里面有此vm_node (在pending map 里面)，
+	        		    ----IFMapServer::ProcessVmSubscribe:
+	        			    ----根据vr_name从client_map_里面查找IFMapClient 
+	        				----new IFMapVmSubscribe
+	        				----***scheduler->Enqueue(IFMapVmSubscribe)					
+	        			----处理完，从pending map清除vm_node
+
+
+

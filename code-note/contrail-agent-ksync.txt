@@ -1,0 +1,90 @@
+KSYNC：
+
+contrail agent ksync:
+----ContrailAgentInit::CreateModules()
+    ----AgentObjectFactory::Create<KSync>(agent()) new KSync初始化以下Object
+	    ----boost::scoped_ptr<InterfaceKSyncObject> interface_ksync_obj_; 
+        ----boost::scoped_ptr<FlowTableKSyncObject> flowtable_ksync_obj_; 
+        ----boost::scoped_ptr<MplsKSyncObject> mpls_ksync_obj_; 
+        ----boost::scoped_ptr<NHKSyncObject> nh_ksync_obj_; 
+        ----boost::scoped_ptr<MirrorKSyncObject> mirror_ksync_obj_; 
+        ----boost::scoped_ptr<VrfKSyncObject> vrf_ksync_obj_;
+        ----boost::scoped_ptr<VxLanKSyncObject> vxlan_ksync_obj_;
+        ----boost::scoped_ptr<VrfAssignKSyncObject> vrf_assign_ksync_obj_;
+        ----boost::scoped_ptr<InterfaceKScan> interface_scanner_;
+        ----boost::scoped_ptr<VnswInterfaceListener> vnsw_interface_listner_;
+		    ----VnswInterfaceListenerLinux
+
+----ContrailInitCommon::RegisterDBClients()
+	----agent()->ksync()->RegisterDBClients(agent()->db());								
+		----KSyncObjectManager::Init();
+			----singleton_ = new KSyncObjectManager();
+				----new WorkQueue<KSyncObjectEvent *>(TaskScheduler::GetInstance()->GetTaskId("Agent::KSync"), 0,boost::bind(&KSyncObjectManager::Process, this, _1));
+					----KSyncObjectManager::Process
+					
+		----interface_ksync_obj_.get()->RegisterDBClients();
+		----vrf_ksync_obj_.get()->RegisterDBClients();
+		----nh_ksync_obj_.get()->RegisterDBClients();
+		----mpls_ksync_obj_.get()->RegisterDBClients();
+		----mirror_ksync_obj_.get()->RegisterDBClients();
+		----vrf_assign_ksync_obj_.get()->RegisterDBClients();
+                                    ----vxlan_ksync_obj_.get()->RegisterDBClients();	
+
+
+			
+----ContrailInitCommon::InitModules()
+    ----KSync::Init
+	    ----NetlinkInit();
+		    ----new KSyncSockNetlink
+            ----GenericNetlinkInit
+                ----KSyncSock::SetNetlinkFamilyId						
+        ----VRouterInterfaceSnapshot();
+		    ----KSyncSock sent
+			    ----KSyncSock::BlockingSend
+				    ----KSyncSockNetlink::SendTo/KSyncSockUdp::SendTo/KSyncSockTypeMap::SendTo
+					----KSyncSockNetlink::SendTo
+					    ----raw::socket.send_to (raw socket send)
+        ----InitFlowMem();
+		    ----flowtable_ksync_obj_.get()->InitFlowMem(); //map flow table entry
+			    ----nl_sendmsg
+				----nl_recvmsg
+				---- /dev/flow, mmap
+				----FlowTableKSyncObject::AuditProcess
+				    ----GetKernelFlowEntry
+				    ----FlowEntry allocate, flowtable add
+					----timer 时间戳
+        ----ResetVRouter();
+		    ----Sandesh::WriteBinary
+			----sock->BlockingSend （KSyncSockTypeMap::SendTo）
+			    ----KSyncSockTypeMap::ProcessSandesh 处理从agent发来的sandesh messages
+			----sock->BlockingRecv()
+			    ----KSyncSockTypeMap::Receive receive msgs from datapath
+		    ----KSyncSock::Start
+        ----CreateVhostIntf();
+		    ----socket
+        ----interface_ksync_obj_.get()->Init();
+		    ----set_test_mode(false)
+        ----flowtable_ksync_obj_.get()->Init();
+		    ----FlowTableKSyncObject::GetFlowKey
+			    ----fill FlowKey
+
+----ContrailInitCommon::InitDone() 
+	----KSync::UpdateVhostMac()
+		----nl_build_if_create_msg(cl, &ifm, 1) == 0
+		----nl_sendmsg(cl) netlink sent to kernel
+		----nl_recvmsg(cl) 						
+	----KSync::VnswInterfaceListenerInit() 
+		----VnswInterfaceListenerBase::InterfaceNotify
+		----VnswInterfaceListenerBase::ProcessEvent
+		----CreateSocket()
+		----SyncCurrentState
+			----InitNetlinkScan 从Kernel 获取link/route/addr
+				----while(NlMsgDecode() == 0) Wait/Read the response for dump request
+					----NlMsgDecode: switch type
+						----ADDR 新建或删除 HandleNetlinkAddrMsg
+						----ROUTE 新建或删除 HandleNetlinkRouteMsg
+						----LINK (interface) 新建或删除 HandleNetlinkIntfMsg 
+						
+	
+controller ksync:
+----

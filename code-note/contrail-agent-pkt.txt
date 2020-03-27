@@ -1,0 +1,479 @@
+---------------------------------------------------------------------------------------------------------------------------------------------------
+Flows in Agent: pkt0 Rx ---> Pkt Handler ---> Flow Setup ---> Flow Table ---> Index Management ---> Flow KSync ---> KSync Socket ---> VRouter 
+---------------------------------------------------------------------------------------------------------------------------------------------------
+Agent:
+----ContrailAgentInit::CreateModules
+	----ContrailInitCommon::CreateModules()
+		----new PktModule				
+----ContrailInitCommon::InitModules()						
+	----pkt()->Init(ksync_enable());
+	----PktModule::Init	
+----InitDoneBase();
+	**----ContrailInitCommon::InitDone() 
+		----ServicesModule::ConfigInit()
+			----BindResolver::Init(*agent()->event_manager()->io_service(), dns_servers,boost::bind(&DnsProto::SendDnsIpc, this, _1));
+				----PktHandler::SendMessage
+---------------------------------------------------------------------------------------------------------------------------------------------------		
+pkt0:
+Pkt0Interface 继承 VrouterControlInterface 继承 ControlInterface
+----------------------------------------------------------------------------
+Class ControlInterface:
+// ControlInterface is base class for control packet I/O between agent and
+// dataplane.处理agent和数据面的基类，注意Process和Send
+----virtual void InitControlInterface() = 0;
+----virtual int Send(const AgentHdr &hdr, const PacketBufferPtr &pkt) = 0;
+----bool Process(const AgentHdr &hdr, const PacketBufferPtr &pkt) {
+        pkt_handler_->HandleRcvPkt(hdr, pkt); //PktHandler
+        return true;
+    }
+PktModule含有control_interface_
+----------------------------------------------------------------------------
+VrouterControlInterface：
+class VrouterControlInterface : public ControlInterface 
+vrouter 和agent之间的cmd
+----std::vector<AgentHdr::PktCommand> vr_cmd_list_; // vrouter --> agent 的cmd
+----std::vector<AgentHdr::PktCommandParams> vr_cmd_params_list_; // vrouter --> agent 的cmd 参数
+----std::vector<uint16_t> agent_cmd_list_;  // agent -> vrouter 的cmd
+----InitControlInterface 初始化cmd cmd 参数
+----AgentHdr::PktCommand VrCmdToAgentCmd(uint16_t vr_cmd)
+----AgentHdr::PktCommandParams VrCmdParamtoAgentCmdParam(uint16_t param)
+----uint16_t AgentCmdToVrCmd(AgentHdr::PktCommand agent_cmd) 
+
+    enum PktCommand {
+        TX_SWITCH = AGENT_CMD_SWITCH,
+        TX_ROUTE = AGENT_CMD_ROUTE,
+        TRAP_ARP = AGENT_TRAP_ARP,
+        TRAP_L2_PROTOCOL = AGENT_TRAP_L2_PROTOCOLS,
+        TRAP_NEXTHOP = AGENT_TRAP_NEXTHOP,
+        TRAP_RESOLVE = AGENT_TRAP_RESOLVE,
+        TRAP_FLOW_MISS = AGENT_TRAP_FLOW_MISS,
+        TRAP_L3_PROTOCOLS = AGENT_TRAP_L3_PROTOCOLS,
+        TRAP_DIAG = AGENT_TRAP_DIAG,
+        TRAP_ECMP_RESOLVE = AGENT_TRAP_ECMP_RESOLVE,
+        TRAP_SOURCE_MISMATCH = AGENT_TRAP_SOURCE_MISMATCH,
+        TRAP_HANDLE_DF = AGENT_TRAP_HANDLE_DF,
+        TRAP_TOR_CONTROL_PKT = AGENT_TRAP_TOR_CONTROL_PKT,
+        TRAP_ZERO_TTL = AGENT_TRAP_ZERO_TTL,
+        TRAP_ICMP_ERROR = AGENT_TRAP_ICMP_ERROR,
+        TRAP_FLOW_ACTION_HOLD = AGENT_TRAP_FLOW_ACTION_HOLD,
+        INVALID = MAX_AGENT_HDR_COMMANDS
+    };
+
+    enum PktCommandParams {
+        PACKET_CMD_PARAM_CTRL = CMD_PARAM_PACKET_CTRL,
+        PACKET_CMD_PARAM_DIAG = CMD_PARAM_1_DIAG,
+        MAX_PACKET_CMD_PARAM  = MAX_CMD_PARAMS,
+    };
+-------------------------
+----int DecodeAgentHdr(AgentHdr *hdr, uint8_t *buff, uint32_t len) 
+    //从buff里面取出agent_hdr部分填充到AgentHdr *hdr
+	// 包括ifindex, vrf, cmd, cmd_param(到cmd_param4多于Encode的参数）, nh,
+	// if cmd ==AGENT_TRAP_HANDLE_DF 才有mtu,flow_index
+	
+----int EncodeAgentHdr(uint8_t *buff, const AgentHdr &hdr) 
+	// Add outer ethernet header
+	//加Ethernet头，初始化ether_shost=1，ether_dhost=2，ether_type = htons(ETHERTYPE_IP)
+	//把hdr里面的hdr_ifindex, vrf, cmd, cmd_param, cmd_param1(只有这两个，少于Decod)填到buff的agent_hdr *vr_agent_hdr
+	
+-------------------------收包处理
+----bool Process(const PacketBufferPtr &pkt) 
+    ----DecodeAgentHdr(&hdr, pkt->data(), pkt->data_len());
+    ----return ControlInterface::Process(hdr, pkt);
+	
+-------------------------发包处理
+----virtual int Send(const AgentHdr &hdr, const PacketBufferPtr &pkt) 
+    ----EncodeAgentHdr(agent_hdr_buff, hdr);
+    ----int ret = Send(agent_hdr_buff, agent_hdr_len, pkt);//
+----virtual int Send(uint8_t *buff, uint16_t buf_len, const PacketBufferPtr &pkt) = 0;
+ 
+----------------------------------------------------------------------------
+class Pkt0Interface: public VrouterControlInterface 
+
+----数据
+    std::string name_;
+    int tap_fd_;
+    unsigned char mac_address_[ETHER_ADDR_LEN];
+    boost::asio::posix::stream_descriptor input_;    
+    uint8_t *read_buff_;
+    PktHandler *pkt_handler_;
+	
+----void ContrailAgentInit::CreateModules() //初始化
+	----pkt0_.reset(new Pkt0Interface("pkt0", agent()->event_manager()->io_service()));
+	----agent()->pkt()->set_control_interface(pkt0_.get());
+
+----virtual void InitControlInterface();// linux freebsd具体处理方式不同
+	----Pkt0Interface::InitControlInterface()// linux 处理方式：
+		----tap_fd_ =open(TUN_INTF_CLONE_DEV, O_RDWR) // 打开/dev/net/tun tun/tap驱动程序实现了虚拟网卡的功能，tun表示虚拟的是点对点设备，tap表示虚拟的是以太网设备
+													//tun设备其实完全不需要有物理地址的,它收到和发出的包不需要arp，也不需要有数据链路层的头.处理二层
+													//tap设备则是有完整的物理地址和完整的以太网帧,处理三层
+		----ioctl(tap_fd_, TUNSETIFF, (void *)
+		----socket bind struct sockaddr_ll ; //注意是openvswitch/types.h
+		----VrouterControlInterface::InitControlInterface(); // agent/vrouter cmd 初始化
+		----Pkt0Interface::AsyncRead() 
+			----boost::bind(&Pkt0Interface::ReadHandler, this,boost::asio::placeholders::error, boost::asio::placeholders::bytes_transferred));
+				----no error:PacketBufferPtr pkt(agent->pkt()->packet_buffer_manager()->Allocate(PktHandler::RX_PACKET, read_buff_, kMaxPacketSize, 0, length,0));
+				----no error:VrouterControlInterface::Process(pkt); //VrouterControlInterface 的收包处理
+				----if error: AsyncRead();//循环处理
+		
+----virtual void IoShutdownControlInterface();
+----virtual void ShutdownControlInterface();
+    
+----int Send(uint8_t *buff, uint16_t buff_len, const PacketBufferPtr &pkt);
+	----input_.async_write_some(buff_list,boost::bind(&Pkt0Interface::WriteHandler, this,boost::asio::placeholders::error,boost::asio::placeholders::bytes_transferred,pkt, buff));
+		----Pkt0Interface::WriteHandler //不断发送，直到发送完毕
+			
+   
+----void AsyncRead();
+----void ReadHandler(const boost::system::error_code &err, std::size_t length);
+----void WriteHandler(const boost::system::error_code &error,std::size_t length, PacketBufferPtr pkt, uint8_t *buff);
+
+---------------------------------------------------------------------------------------------------------------------------------------------------	
+Pkt Handler:
+就是转到相应的PktModule处理
+
+-------------------收包
+PktHandler::HandleRcvPkt：
+	----IsFlowPacket(hdr) // 如果是已经有flow的包
+		---- PktModuleEnqueue(FLOW, hdr, pkt_info); // 转到FLOW 模块处理
+			----stats_.PktRcvd(mod);			
+			----(enqueue_cb_.at(mod))(pkt_info) // boost::array<RcvQueueFunc, MAX_MODULES> enqueue_cb_;
+												// 之前有register     enqueue_cb_.at(type) = cb;
+												// 根据pkt_type 设置 PktModuleName 进入代码模块：enqueue, 
+												// 目前是FLOW
+			----stats_.PktQThresholdExceeded(mod);
+			
+	----boost::shared_ptr<PacketBufferEnqueueItem> info(new PacketBufferEnqueueItem(hdr, buff));
+			// 放入PacketBufferEnqueueItem队列，后续进入PktHandler::ProcessPacket
+	----work_queue_.Enqueue(info);
+
+-----------------解包
+----new PktHandler bind PktHandler::ProcessPacket // 处理包，解包
+	----PktModuleName mod = ParsePacket(hdr, pkt_info.get(), pkt);// Process the packet received from tap interface
+		----ParseUserPkt // Parse packet before computing forwarding mode. Packet is parsed indepndent of packet forwarding mode
+			----ParseEthernetHeader
+			----SetOuterIp
+			----ParseIpPacket
+			----Parse XXX tunnel // MPLSoUDP or MPLSoGRE no VxLAN
+			----ParseIpPacket
+				
+		----ComputeForwardingMode	
+	----PktModuleEnqueue(mod, hdr, pkt_info); // 转到对应的PktModule处理
+
+-----------------发包	
+PktHandler::Send(const AgentHdr &hdr, const PacketBufferPtr &buff) 
+	----stats_.PktSent(PktHandler::PktModuleName(buff->module()));
+	----agent_->pkt()->control_interface()->Send(hdr, buff) // ControlInterface::Send(const AgentHdr &hdr, const PacketBufferPtr &pkt) 
+														// 注意已经EncodeAgentHdr
+	
+PktHandler::SendMessage(PktModuleName mod, InterTaskMsg *msg)
+	----enqueue_cb_.at(mod) //进入Mod callback具体
+	                    //具体 Protocol 调用此函数 SendXXXIpc 比如
+						//agent_->pkt()->pkt_handler()->SendMessage(PktHandler::DHCP, ipc);进入DHCP处理
+	
+---------------------------------------------------------------------------------------------------------------------------------------------------
+---------------------------------------------------------------------------------------------------------------------------------------------------
+AgentHdr:{
+    uint32_t            ifindex;		//interface
+    uint32_t            vrf;
+    uint16_t            cmd;  			//PktCommand
+    uint32_t            cmd_param;		//PktCommandParams
+    uint32_t            cmd_param_1;
+    uint32_t            cmd_param_2;
+    uint32_t            cmd_param_3;
+    uint32_t            cmd_param_4;
+    uint32_t            nh;
+    uint32_t            flow_index;
+    uint16_t            mtu;
+}
+---------------------------------------------------------------------------------------------------------------------------------------------------
+
+class Proto 
+// 所有具体Protocol的基类，只是管理task
+FlowProto,DiagProto,DhcpProto,IcmpProto,ArpProto,DnsProto继承Proto
+// Protocol task (work queue for each protocol)
+
+new 的时候：work_queue_(TaskScheduler::GetInstance()->GetTaskId(task_name), mod, boost::bind(&Proto::ProcessProto, this, _1)) 
+	----Proto::ProcessProto(boost::shared_ptr<PktInfo> msg_info) 
+		----ProtoHandler *handler = AllocProtoHandler(msg_info, io_); //  virtual ProtoHandler *AllocProtoHandler(boost::shared_ptr<PktInfo> info,boost::asio::io_service &io) = 0;
+				//有具体XXXProto实现，比如 FlowProto 的 AllocProtoHandler ，返回new FlowHandler(agent(), info, io);
+		----if (handler->Run()) delete handler; //进入具体的XXXHandler::Run
+			----bool FlowHandler::Run() {
+				----if PktType::INVALID
+					----mod = agent_->pkt()->pkt_handler()->ParseFlowPacket(pkt_info_, pkt);
+						----if mod not PktHandler::FLOW, return true
+						----else  info.SetPktInfo(pkt_info_);
+				----else if pkt_info_->type == PktType::MESSAGE
+					----从<FlowTaskMsg>获取FlowEntry 填充到pkt_info_
+					
+				----if (in.intf_ && out.intf_) { info.local_flow = true;} // local_flow
+					
+				----PktFlowInfo::Process(pkt_info_.get(), &in, &out)
+					----in->vrf_ = Agent::GetInstance()->vrf_table()->FindVrfFromId(pkt->agent_hdr.vrf); // 根据pkt_info_->agent_hdr获取in vrf
+					----ingress = ComputeDirection(in->intf_);  
+						// 根据in-interface计算方向, intf->type() == Interface::PHYSICAL 既物理网卡收到包,
+						// IPFabric --> VM是EGRESS,其余全是INGRESS 
+					----if ingress, IngressProcess(pkt, in, out);
+						----UpdateRoute(&in->rt_, in->vrf_, pkt->ip_saddr, pkt->smac, flow_source_plen_map) 
+							// 通过in vrfid  ip/mac获取route 
+							// l3_flow判断是l2或l3 就是查vrf表，搜索ip/mac LPM搜索,获取完整vrf
+						----CheckLinkLocal(pkt);
+								// if link local service有值,则l3_flow = true; pkt->l3_forwarding = true;
+						----out->vrf_ = in->vrf_;
+						---- UpdateRoute(&out->rt_, out->vrf_, pkt->ip_daddr, pkt->dmac, flow_dest_plen_map); 
+							// 通过out vrfid  ip/mac获取route , ******注意和in source/dest是反的
+						----VrfTranslate(pkt, in, out, pkt->ip_saddr, false)
+							----
+						
+					----if not ingress, EgressProcess(pkt, in, out);
+					----SetInEcmpIndex(pkt, this, in, out);
+					----SetEcmpFlowInfo(pkt, in, out);
+						
+				
+				----PktFlowInfo::Add(const PktInfo *pkt, PktControlInfo *in, PktControlInfo *out) 
+	
+	
+	
+---------------------------------------------------------------------------------------------------------------------------------------------------
+DHCP:
+
+DhcpHandler::Run() 
+----PktType::MESSAGE: HandleMessage();
+	
+----default: HandleVmRequest();
+
+
+
+---------------------------------------------------------------------------------------------------------------------------------------------------
+
+		
+---------------------------------------------------------------------------------------------------------------------------------------------------				
+----new PktModule
+	----new PacketBufferManager(this)) 
+		----Packet Buffer 提供alloc,free buffer,指定对应的PktModule
+		
+----PktModule::Init
+	----boost::asio::io_service &io = *agent_->event_manager()->io_service();
+	----new PktHandler  //PktHandler处理tap口的数据，发送packet到tap口，从tap口接收数据 ******
+		----pkt_trace_： 数组元素类型：PktTrace； 数组大小：MAX_MODULES
+			----PktTrace：包括vector<Pkt> pkt_buffer_ , Pkt是数组，大小kPktMaxTraceSize，一个Pkt数组默认的数据是8bit x 512=512字节
+		----如果DHCP或DHCPV6或DNS则kPktMaxTraceSize=512，否则kPktMaxTraceSize=128
+		
+	----control_interface_->Init(pkt_handler_.get()) // ControlInterface is base class for control packet I/O between agent and dataplane.									
+		----pkt_handler_ = pkt_handler;
+		----InitControlInterface
+			----VrouterControlInterface()：				
+			----Pkt0Interface::InitControlInterface()
+				----open tap,fd, socket,
+				----VrouterControlInterface::InitControlInterface(); //virtual void InitControlInterface()			
+					----std::vector<AgentHdr::PktCommand> vr_cmd_list_; //Init and populate vector for translating command types from vrouter to agent
+					----std::vector<uint16_t> agent_cmd_list_;  //Init and populate vector for translating command types from agent to vrouter
+				----Pkt0Interface::AsyncRead() //kMaxPacketSize=9060
+					input_.async_read_some(boost::asio::buffer(read_buff_, kMaxPacketSize), boost::bind(&Pkt0Interface::ReadHandler, this, boost::asio::placeholders::error,boost::asio::placeholders::bytes_transferred));
+					----Pkt0Interface::ReadHandler
+						----packet tap no error
+							----PacketBufferPtr pkt(agent->pkt()->packet_buffer_manager()->Allocate(PktHandler::RX_PACKET, read_buff_, kMaxPacketSize, 0, length,0));
+							----VrouterControlInterface::Process(pkt); 
+								----Format of packet trapped is ****************OUTER_ETH - AGENT_HDR - PAYLOAD*****************
+								----agent_hdr_len = DecodeAgentHdr(&hdr, pkt->data(), pkt->data_len()); // 在pkt->data()加上AgentHdr头，
+								----pkt->SetOffset(agent_hdr_len); //指针前移到AgentHdr
+								----return ControlInterface::Process(hdr, pkt); //进入Handle control packet.
+									----pkt_handler_->HandleRcvPkt(hdr, pkt); //处理从tap口接收的数据*****
+								
+						----AsyncRead();//packet tap error
+						
+	----new FlowTable, 
+	----flow_table_->Init()
+		----指定agent,FlowTable::Init() 包括acl_listener_id_;intf_listener_id_;vn_listener_id_;vm_listener_id_;vrf_listener_id_;NhListener *nh_listener_;
+			----register XXX_listener_id_ 为 FlowTable::AclNotify，FlowTable::IntfNotify，FlowTable::VnNotify，FlowTable::VrfNotify //后续进入相应的处理 ******
+			
+	----new FlowProto, 
+	----flow_proto_->Init()
+		----Proto::Proto boost::bind(&Proto::ProcessProto
+			----ProtoHandler：Run 虚函数，具体protol的module实现
+			以IcmpErrorHandler::Run()为例
+				----IcmpHandler::Run() 
+					----CheckPacket ok //checksum
+					----IcmpHandler::SendResponse //Form ICMP Packet with following: EthHdr - IP Header - ICMP Header
+						----Recompute ICMP checksum
+						----ProtoHandler::Send //send packet to the pkt0 interface ***********************************
+							----PktHandler::Send // Send packet to tap interface
+								----PktHandler::PktStats::PktSent( 
+					
+	
+
+————————————————————————————————————————————————
+
+	
+	
+	
+	
+	
+(gdb) bt
+#0  FlowTable::Add (this=0x2b202003e8e0, flow=0x2b2028094130, rflow=0x2b20280951a0, update=false)
+    at controller/src/vnsw/agent/pkt/flow_table.cc:1025
+#1  0x000000000174ed50 in PktFlowInfo::Add (this=0x2b201a31f780, pkt=0x397a6d0, in=0x2b201a31f700, out=0x2b201a31f740)
+    at controller/src/vnsw/agent/pkt/pkt_flow_info.cc:1527
+#2  0x000000000175d58a in FlowHandler::Run (this=0x2b20280959f0) at controller/src/vnsw/agent/pkt/flow_handler.cc:91
+#3  0x00000000017588bc in Proto::ProcessProto (this=0x2b2020022a90, msg_info=...) at controller/src/vnsw/agent/pkt/proto.cc:47
+#4  0x000000000175b2fe in boost::_mfi::mf1<bool, Proto, boost::shared_ptr<PktInfo> >::operator() (this=0x2b201a31fb68, p=0x2b2020022a90, 
+    a1=...) at /usr/include/boost/bind/mem_fn_template.hpp:165
+#5  0x000000000175acaa in boost::_bi::list2<boost::_bi::value<Proto*>, boost::arg<1> >::operator()<bool, boost::_mfi::mf1<bool, Proto, boost::shared_ptr<PktInfo> >, boost::_bi::list1<boost::shared_ptr<PktInfo>&> > (this=0x2b201a31fb78, f=..., a=...)
+    at /usr/include/boost/bind/bind.hpp:303
+#6  0x000000000175a61e in boost::_bi::bind_t<bool, boost::_mfi::mf1<bool, Proto, boost::shared_ptr<PktInfo> >, boost::_bi::list2<boost::_bi::value<Proto*>, boost::arg<1> > >::operator()<boost::shared_ptr<PktInfo> > (this=0x2b201a31fb68, a1=...)
+    at /usr/include/boost/bind/bind_template.hpp:32
+#7  0x000000000175a225 in boost::detail::function::function_obj_invoker1<boost::_bi::bind_t<bool, boost::_mfi::mf1<bool, Proto, boost::shared_ptr<PktInfo> >, boost::_bi::list2<boost::_bi::value<Proto*>, boost::arg<1> > >, bool, boost::shared_ptr<PktInfo> >::invoke (
+    function_obj_ptr=..., a0=...) at /usr/include/boost/function/function_template.hpp:132
+#8  0x000000000174658c in boost::function1<bool, boost::shared_ptr<PktInfo> >::operator() (this=0x2b201a31fb60, a0=...)
+    at /usr/include/boost/function/function_template.hpp:767
+#9  0x000000000175b676 in QueueTaskRunner<boost::shared_ptr<PktInfo>, WorkQueue<boost::shared_ptr<PktInfo> > >::RunQueue (this=0x396de70)
+    at controller/src/base/queue_task.h:87
+#10 0x000000000175b47c in QueueTaskRunner<boost::shared_ptr<PktInfo>, WorkQueue<boost::shared_ptr<PktInfo> > >::Run (this=0x396de70)
+    at controller/src/base/queue_task.h:66
+#11 0x0000000001dc73d0 in TaskImpl::execute (this=0x2b2019316140) at controller/src/base/task.cc:253
+#12 0x00002b2012a3c96a in tbb::internal::custom_scheduler<tbb::internal::IntelSchedulerTraits>::local_wait_for_all(tbb::task&, tbb::task*)
+    () from /lib64/libtbb.so.2
+#13 0x00002b2012a385a6 in tbb::internal::arena::process(tbb::internal::generic_scheduler&) () from /lib64/libtbb.so.2
+#14 0x00002b2012a37c6b in tbb::internal::market::process(rml::job&) () from /lib64/libtbb.so.2
+#15 0x00002b2012a3565f in tbb::internal::rml::private_worker::run() () from /lib64/libtbb.so.2
+#16 0x00002b2012a35859 in tbb::internal::rml::private_worker::thread_routine(void*) () from /lib64/libtbb.so.2
+---Type <return> to continue, or q <return> to quit---
+#17 0x00002b2012806df5 in start_thread () from /lib64/libpthread.so.0
+#18 0x00002b20135651ad in clone () from /lib64/libc.so.6
+
+
+(gdb) bt
+#0  PktHandler::ParseEthernetHeader (this=0x7fffe0026020, pkt_info=0x7fffc0003630, pkt=0x272e798 "\240\066\237l}4d>\214\261p\235\b\006")
+    at controller/src/vnsw/agent/pkt/pkt_handler.cc:310
+#1  0x00000000017373c9 in PktHandler::ParseUserPkt (this=0x7fffe0026020, pkt_info=0x7fffc0003630, intf=0x7fffe00611c0, 
+    pkt_type=@0x7fffed7bc88c: PktType::INVALID, pkt=0x272e798 "\240\066\237l}4d>\214\261p\235\b\006")
+    at controller/src/vnsw/agent/pkt/pkt_handler.cc:563
+#2  0x0000000001735388 in PktHandler::ParsePacket (this=0x7fffe0026020, hdr=..., pkt_info=0x7fffc0003630, 
+    pkt=0x272e798 "\240\066\237l}4d>\214\261p\235\b\006") at controller/src/vnsw/agent/pkt/pkt_handler.cc:94
+#3  0x0000000001735d87 in PktHandler::ProcessPacket (this=0x7fffe0026020, item=...) at controller/src/vnsw/agent/pkt/pkt_handler.cc:218
+#4  0x000000000173d52e in boost::_mfi::mf1<bool, PktHandler, boost::shared_ptr<PktHandler::PacketBufferEnqueueItem> >::operator() (
+    this=0x7fffed7bcb68, p=0x7fffe0026020, a1=...) at /usr/include/boost/bind/mem_fn_template.hpp:165
+#5  0x000000000173ceda in boost::_bi::list2<boost::_bi::value<PktHandler*>, boost::arg<1> >::operator()<bool, boost::_mfi::mf1<bool, PktHandler, boost::shared_ptr<PktHandler::PacketBufferEnqueueItem> >, boost::_bi::list1<boost::shared_ptr<PktHandler::PacketBufferEnqueueItem>&> > (
+    this=0x7fffed7bcb78, f=..., a=...) at /usr/include/boost/bind/bind.hpp:303
+#6  0x000000000173c84e in boost::_bi::bind_t<bool, boost::_mfi::mf1<bool, PktHandler, boost::shared_ptr<PktHandler::PacketBufferEnqueueItem> >, boost::_bi::list2<boost::_bi::value<PktHandler*>, boost::arg<1> > >::operator()<boost::shared_ptr<PktHandler::PacketBufferEnqueueItem> >
+    (this=0x7fffed7bcb68, a1=...) at /usr/include/boost/bind/bind_template.hpp:32
+#7  0x000000000173c30b in boost::detail::function::function_obj_invoker1<boost::_bi::bind_t<bool, boost::_mfi::mf1<bool, PktHandler, boost::shared_ptr<PktHandler::PacketBufferEnqueueItem> >, boost::_bi::list2<boost::_bi::value<PktHandler*>, boost::arg<1> > >, bool, boost::shared_ptr<PktHandler::PacketBufferEnqueueItem> >::invoke (function_obj_ptr=..., a0=...) at /usr/include/boost/function/function_template.hpp:132
+#8  0x000000000173de4a in boost::function1<bool, boost::shared_ptr<PktHandler::PacketBufferEnqueueItem> >::operator() (this=0x7fffed7bcb60, 
+    a0=...) at /usr/include/boost/function/function_template.hpp:767
+#9  0x000000000173da24 in QueueTaskRunner<boost::shared_ptr<PktHandler::PacketBufferEnqueueItem>, WorkQueue<boost::shared_ptr<PktHandler::PacketBufferEnqueueItem> > >::RunQueue (this=0x27289a0) at controller/src/base/queue_task.h:87
+#10 0x000000000173d82a in QueueTaskRunner<boost::shared_ptr<PktHandler::PacketBufferEnqueueItem>, WorkQueue<boost::shared_ptr<PktHandler::PacketBufferEnqueueItem> > >::Run (this=0x27289a0) at controller/src/base/queue_task.h:66
+#11 0x0000000001db918c in TaskImpl::execute (this=0x7fffef59bd40) at controller/src/base/task.cc:253
+#12 0x00007ffff5ab396a in tbb::internal::custom_scheduler<tbb::internal::IntelSchedulerTraits>::local_wait_for_all(tbb::task&, tbb::task*)
+    () from /lib64/libtbb.so.2
+#13 0x00007ffff5aaf5a6 in tbb::internal::arena::process(tbb::internal::generic_scheduler&) () from /lib64/libtbb.so.2
+#14 0x00007ffff5aaec6b in tbb::internal::market::process(rml::job&) () from /lib64/libtbb.so.2
+---Type <return> to continue, or q <return> to quit---	
+	
+
+
+(gdb) bt
+#0  PktFlowInfo::FloatingIpSNat (this=0x2b39c3b19780, pkt=0x32356c0, in=0x2b39c3b19700, out=0x2b39c3b19740)
+    at controller/src/vnsw/agent/pkt/pkt_flow_info.cc:814
+#1  0x000000000174d3d1 in PktFlowInfo::IngressProcess (this=0x2b39c3b19780, pkt=0x32356c0, in=0x2b39c3b19700, out=0x2b39c3b19740)
+    at controller/src/vnsw/agent/pkt/pkt_flow_info.cc:1067
+#2  0x000000000174e0b0 in PktFlowInfo::Process (this=0x2b39c3b19780, pkt=0x32356c0, in=0x2b39c3b19700, out=0x2b39c3b19740)
+    at controller/src/vnsw/agent/pkt/pkt_flow_info.cc:1316
+#3  0x000000000175d4ff in FlowHandler::Run (this=0x2b39dc0b6440) at controller/src/vnsw/agent/pkt/flow_handler.cc:71
+#4  0x000000000175890c in Proto::ProcessProto (this=0x2b39c4024ab0, msg_info=...) at controller/src/vnsw/agent/pkt/proto.cc:47
+#5  0x000000000175b34e in boost::_mfi::mf1<bool, Proto, boost::shared_ptr<PktInfo> >::operator() (this=0x2b39c3b19b68, p=0x2b39c4024ab0, 
+    a1=...) at /usr/include/boost/bind/mem_fn_template.hpp:165
+#6  0x000000000175acfa in boost::_bi::list2<boost::_bi::value<Proto*>, boost::arg<1> >::operator()<bool, boost::_mfi::mf1<bool, Proto, boost::shared_ptr<PktInfo> >, boost::_bi::list1<boost::shared_ptr<PktInfo>&> > (this=0x2b39c3b19b78, f=..., a=...)
+    at /usr/include/boost/bind/bind.hpp:303
+#7  0x000000000175a66e in boost::_bi::bind_t<bool, boost::_mfi::mf1<bool, Proto, boost::shared_ptr<PktInfo> >, boost::_bi::list2<boost::_bi::value<Proto*>, boost::arg<1> > >::operator()<boost::shared_ptr<PktInfo> > (this=0x2b39c3b19b68, a1=...)
+    at /usr/include/boost/bind/bind_template.hpp:32	
+	
+	
+	
+10:56:42.550615 IP0 bad-hlen 0
+-------------itf--vrf--cmd---------------------------
+	0x0000:  0014 0001 0006 0006 a1f4 0000 00af 0000  ................
+--------------------------------------mac------------
+	0x0010:  0000 0000 0000 0000 0000 02e0 05f9 b0ee  ................
+-------------mac------------ip---payload-------------
+	0x0020:  0256 e99e 3942 0800 4500 0054 0000 4000  .V..9B..E..T..@.
+-------------mac------------------------------------
+	0x0030:  4001 a66f ac10 9e0d ac10 9e0b 0800 8fc0  @..o............
+	0x0040:  2343 0001 6a71 4257 0000 0000 d15f 0800  #C..jqBW....._..
+	0x0050:  0000 0000 1011 1213 1415 1617 1819 1a1b  ................
+	0x0060:  1c1d 1e1f 2021 2223 2425 2627 2829 2a2b  .....!"#$%&'()*+
+	0x0070:  2c2d 2e2f 3031 3233 3435 3637            ,-./01234567	
+	
+ printk(KERN_CRIT "%s: len is %#x (data:%#x mac:%#x) truesize %#x\n", prefix,
+             skb->len, skb->data_len, skb->mac_len, skb->truesize);
+vr_printf("vrouter skb dump: len is %#x (data:%#x mac:%#x) truesize %#x\n", skb->len, skb->data_len, skb->mac_len, skb->truesize);	
+
+
+struct ethhdr *ethh = eth_hdr(skb);	
+if (ethh) {
+    printk("vrouter: eth: (%p) src:%pM dest:%pM proto %u\n", ethh, ethh->h_source, ethh->h_dest, ntohs(ethh->h_proto));
+}
+	
+<4>Apr  1 16:20:15 node-23 kernel: CPU: 1 PID: 20620 Comm: kworker/1:1 Tainted: G           OE  ------------   3.10.0-327.3.1.el7.x86_64 #1
+<4>Apr  1 16:20:15 node-23 kernel: Hardware name: Dell Inc. PowerEdge R720/068CDY, BIOS 2.4.3 07/09/2014
+<4>Apr  1 16:20:15 node-23 kernel: Workqueue: events lh_work [vrouter]
+<4>Apr  1 16:20:15 node-23 kernel: task: ffff881fe7da5c00 ti: ffff881fe7f4c000 task.ti: ffff881fe7f4c000
+<4>Apr  1 16:20:15 node-23 kernel: RIP: 0010:[<ffffffff812fc12a>]  [<ffffffff812fc12a>] ip4_string+0x5a/0x140
+<4>Apr  1 16:20:15 node-23 kernel: RSP: 0018:ffff881fe7f4f8a8  EFLAGS: 00010046
+<4>Apr  1 16:20:15 node-23 kernel: RAX: 0000000000000000 RBX: ffff881fe7f4f8b5 RCX: 0000000000000000
+<4>Apr  1 16:20:15 node-23 kernel: RDX: ffffffffa0744c00 RSI: 00000000030a0a0a RDI: ffff881fe7f4f8b5
+<4>Apr  1 16:20:15 node-23 kernel: RBP: ffff881fe7f4f8e8 R08: 000000000000ffff R09: 000000000000ffff
+<4>Apr  1 16:20:15 node-23 kernel: R10: 0000000000000007 R11: 0000000000000050 R12: 0000000000000000
+<4>Apr  1 16:20:15 node-23 kernel: R13: 00000000030a0a0a R14: 0000000000000004 R15: ffff881fe7f4f900
+<4>Apr  1 16:20:15 node-23 kernel: FS:  0000000000000000(0000) GS:ffff881fff200000(0000) knlGS:0000000000000000
+<4>Apr  1 16:20:15 node-23 kernel: CS:  0010 DS: 0000 ES: 0000 CR0: 0000000080050033
+<4>Apr  1 16:20:15 node-23 kernel: CR2: 00000000030a0a0a CR3: 000000000194a000 CR4: 00000000001427e0
+<4>Apr  1 16:20:15 node-23 kernel: DR0: 0000000000000000 DR1: 0000000000000000 DR2: 0000000000000000
+<4>Apr  1 16:20:15 node-23 kernel: DR3: 0000000000000000 DR6: 00000000ffff0ff0 DR7: 0000000000000400
+<4>Apr  1 16:20:15 node-23 kernel: Stack:
+<4>Apr  1 16:20:15 node-23 kernel: 4900000000000001 ffff880fff449400 00000000cf0e28f1 ffffffff81ca9dde
+<4>Apr  1 16:20:15 node-23 kernel: ffffffff81caa1a0 0000000000000000 ffffffff81caa1a0 ffffffffa0744bff
+<4>Apr  1 16:20:15 node-23 kernel: ffff881fe7f4f930 ffffffff812fdd1d 0000ffff0000ffff ffff881fe7f4f930
+<4>Apr  1 16:20:15 node-23 kernel: Call Trace:
+<4>Apr  1 16:20:15 node-23 kernel: [<ffffffff812fdd1d>] ip4_addr_string.isra.10+0x3d/0x80
+<4>Apr  1 16:20:15 node-23 kernel: [<ffffffff813c3afc>] ? scrup+0x16c/0x180
+<4>Apr  1 16:20:15 node-23 kernel: [<ffffffff812febdc>] pointer.isra.19+0x14c/0x4c0
+<4>Apr  1 16:20:15 node-23 kernel: [<ffffffff816412da>] ? atomic_notifier_call_chain+0x1a/0x20
+<4>Apr  1 16:20:15 node-23 kernel: [<ffffffff813c3e35>] ? vt_console_print+0x275/0x420
+<4>Apr  1 16:20:15 node-23 kernel: [<ffffffff812ff0da>] vsnprintf+0x18a/0x6a0
+<4>Apr  1 16:20:15 node-23 kernel: [<ffffffff812ff5fd>] vscnprintf+0xd/0x30
+<4>Apr  1 16:20:15 node-23 kernel: [<ffffffff8107d821>] vprintk_emit+0x111/0x530
+<4>Apr  1 16:20:15 node-23 kernel: [<ffffffff8107dc5f>] vprintk+0x1f/0x30
+<4>Apr  1 16:20:15 node-23 kernel: [<ffffffffa071ea68>] lh_printk+0x58/0x80 [vrouter]
+<4>Apr  1 16:20:15 node-23 kernel: [<ffffffffa0723276>] linux_if_tx+0x3a6/0x5a0 [vrouter]
+<4>Apr  1 16:20:15 node-23 kernel: [<ffffffffa071ea10>] ? rcu_cb+0x40/0x40 [vrouter]
+<4>Apr  1 16:20:15 node-23 kernel: [<ffffffffa072e8d7>] eth_tx+0x117/0x290 [vrouter]
+<4>Apr  1 16:20:15 node-23 kernel: [<ffffffffa072941c>] nh_vxlan_tunnel+0x22c/0x330 [vrouter]
+<4>Apr  1 16:20:15 node-23 kernel: [<ffffffffa071ea68>] ? lh_printk+0x58/0x80 [vrouter]
+<4>Apr  1 16:20:15 node-23 kernel: [<ffffffffa072a046>] nh_output+0x116/0x270 [vrouter]
+<4>Apr  1 16:20:15 node-23 kernel: [<ffffffffa073cdc4>] vr_bridge_input+0x2c4/0x500 [vrouter]
+<4>Apr  1 16:20:15 node-23 kernel: [<ffffffffa071ea10>] ? rcu_cb+0x40/0x40 [vrouter]
+<4>Apr  1 16:20:15 node-23 kernel: [<ffffffff8107dc5f>] ? vprintk+0x1f/0x30
+<4>Apr  1 16:20:15 node-23 kernel: [<ffffffffa071ea10>] ? rcu_cb+0x40/0x40 [vrouter]
+<4>Apr  1 16:20:15 node-23 kernel: [<ffffffffa072d1c2>] vr_reinject_packet+0x132/0x190 [vrouter]
+<4>Apr  1 16:20:15 node-23 kernel: [<ffffffffa0738dbb>] vr_flow_flush_pnode+0x11b/0x200 [vrouter]
+<4>Apr  1 16:20:15 node-23 kernel: [<ffffffffa07390b5>] vr_flush_entry.isra.31+0x65/0xc0 [vrouter]
+<4>Apr  1 16:20:15 node-23 kernel: [<ffffffffa07391d4>] vr_flow_work+0xc4/0x1c0 [vrouter]
+<4>Apr  1 16:20:15 node-23 kernel: [<ffffffffa071e894>] lh_work+0x14/0x20 [vrouter]
+<4>Apr  1 16:20:15 node-23 kernel: [<ffffffff8109d5fb>] process_one_work+0x17b/0x470
+<4>Apr  1 16:20:15 node-23 kernel: [<ffffffff8109e3cb>] worker_thread+0x11b/0x400
+<4>Apr  1 16:20:15 node-23 kernel: [<ffffffff8109e2b0>] ? rescuer_thread+0x400/0x400
+<4>Apr  1 16:20:15 node-23 kernel: [<ffffffff810a5aef>] kthread+0xcf/0xe0
+<4>Apr  1 16:20:15 node-23 kernel: [<ffffffff810a5a20>] ? kthread_create_on_node+0x140/0x140
+<4>Apr  1 16:20:15 node-23 kernel: [<ffffffff81645818>] ret_from_fork+0x58/0x90
+<4>Apr  1 16:20:15 node-23 kernel: [<ffffffff810a5a20>] ? kthread_create_on_node+0x140/0x140
+<4>Apr  1 16:20:15 node-23 kernel: Code: 02 3c 68 0f 84 d0 00 00 00 3c 6c 0f 84 c8 00 00 00 c7 45 c0 01 00 00 00 45 31 e4 48 8d 5d cd 41 be 04 00 00 00 49 63 c4 48 89 df <41> 0f b6 74 05 00 e8 4b fe ff ff 48 29 d8 80 7d c7 69 74 42 8d 
+<1>Apr  1 16:20:15 node-23 kernel: RIP  [<ffffffff812fc12a>] ip4_string+0x5a/0x140
+<4>Apr  1 16:20:15 node-23 kernel: RSP <ffff881fe7f4f8a8>
+<4>Apr  1 16:20:15 node-23 kernel: CR2: 00000000030a0a0a
+<4>Apr  1 16:20:15 node-23 kernel: ---[ end trace 418acc7abd20599b ]---
+<0>Apr  1 16:20:15 node-23 kernel: Kernel panic - not syncing: Fatal exception
+
+Message from syslogd@node-23 at Apr  1 16:20:15 ...
+ kernel:Kernel panic - not syncing: Fatal exception
+
+Message from syslogd@node-23 at Apr  1 16:20:15 ...
+ kernel:Kernel panic - not syncing: Fatal exception
