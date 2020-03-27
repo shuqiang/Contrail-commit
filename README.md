@@ -3,7 +3,6 @@
 
 # Deploy
 * [OpenContrail5.0.3+Openstack-Ocata](https://github.com/shuqiang/OpenContrail/blob/master/deploy/OpenContrail5.0.3%2BOpenstack-Ocata.md)
-* [Fabric Install Note](https://github.com/shuqiang/OpenContrail/blob/master/deploy/fabric-install-note.md)
 
 # Test
 * [DPDK Mode Forward Performance Test](https://github.com/shuqiang/OpenContrail/blob/master/test/DPDK%20Mode%20Forward%20Performance%20Test.md)
@@ -24,6 +23,10 @@
 
 * [L3-Vxlan-Controller](https://github.com/shuqiang/OpenContrail/blob/master/commits/L3-Vxlan-Controller.diff)
 * [L3-Vxlan-Vrouter](https://github.com/shuqiang/OpenContrail/blob/master/commits/L3-Vxlan-Vrouter.diff)
+
+# Code Note
+most notes are based on OpenContrail R2.2 and R3.2
+
 
 # How to
 
