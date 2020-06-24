@@ -6,3 +6,10 @@ When two or more rules are created in parallel, there will be  problems. For exa
 when adding rule D and E, the first HTTP is sent to read to the contrail API, and the second HTTP request sent to the contrail API contains rules A, B, and C,D. 
 After posted success, the second HTTP request sent to the contrail API by adding rule  contains A, B, C, E (excluding rule D, because all rules obtained before the successful creation of rule D) and is also successful. 
 However, rule D cannot be seen in the security group of the contrail API and there are only rules A, B, C, E.
+
+查看contrail 里面和neutron 相关的代码，发现在创建安全组的规则的时候，会先发送第一条http 向contrail-api读取相关的安全组，本地从安全组读取规则，本地添加新的规则到此安全组。
+会发送第二条http 到contrail-api以更新此安全组。
+并行创建2条或更多的规则的时候，会出问题，
+举个例子，比如安全组已经有规则a,b,c添加成功，在添加规则d和e时，都是发送第一条http 向contrail-api读取到本地，都是三条规则a,b,c, 
+添加规则d的第二条发送给contrail-api的HTTP请求是包含a,b,c,d，成功之后，添加规则e的第二条发送给contrail-api的HTTP请求是包含a,b,c,e的（不包含规则d,因为是在规则d创建成功之前获取的所有规则），
+同样成功，但是contrail-api的安全组里面只有a,b,c,e这些规则，就看不到规则d。
