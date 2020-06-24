@@ -1,0 +1,8 @@
+Check the codes related to neutron in the contrail config.
+It is found that when creating the security group rules, the first HTTP will be sent to read the related security group to the contrail API, client  will read the rules  from the security group, and add new rules to the security group. 
+Then the second HTTP is sent to the contrail API to update this security group.
+
+When two or more rules are created in parallel, there will be  problems. For example, the security group has successfully added rules such as A, B, and C.
+when adding rule D and E, the first HTTP is sent to read to the contrail API, and the second HTTP request sent to the contrail API contains rules A, B, and C,D. 
+After posted success, the second HTTP request sent to the contrail API by adding rule  contains A, B, C, E (excluding rule D, because all rules obtained before the successful creation of rule D) and is also successful. 
+However, rule D cannot be seen in the security group of the contrail API and there are only rules A, B, C, E.
