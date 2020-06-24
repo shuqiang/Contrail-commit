@@ -1,0 +1,25 @@
+各个角色
+TSN （TOR Services Node ):
+TSN将充当TOR交换机的多播控制器，还将为裸机服务器或在TOR端口后面运行的虚拟实例提供DHCP和DNS服务。
+TSN将接收来自TOR的所有广播包，然后将其复制到群集中的所需计算节点和其他EVPN节点。来自群集中的虚拟机的广播报从各个计算节点直接发送到TOR交换机。
+------
+TOR agent:
+作为OVSDB client 连接 TOR switch，所有OVSDB与TOR的交互都是通过TOR agent完成的。它对TOR交换机上的不同OVSDB表进行编程，并从中接收本地unicast table entries。TOR agent接收与TOR交换机相关的配置。它将OpenContrail配置转换为OVSDB，并在TOR交换机中填充相关的OVSDB表条目。
+一般在TSN节点后面运行。
+------
+TOR switch:
+
+----------------------------
+控制面：
+TOR代理接收TOR交换机端口所在的虚拟网络的EVPN条目（路由）。它们被添加到OVSDB中的“unicast remote table”中。
+在不同 logical switches（来自OVSDB中的本地表的条目）中在TOR交换机中学习的MAC地址被传播到TOR agent。 TOR agent计算将它们导出到相应EVPN表中的控制节点，EVPN表进一步分发到其他控制器，然后分配给集群中的节点和其他EVPN节点。
+TSN节点从控制节点接收每个虚拟网络的复制树。其他计算节点还从控制节点接收复制树，并且该树包括TSN节点。
+--------------------------------------
+数据面：
+vxlan封装，VTEP 将位于TOR交换机上。
+单播：
+如果目标MAC在虚拟交换机中已知，则来自裸机服务器的单播流量是由TOR交换机封装的VXLAN并被转发。
+来自OpenContrail集群中虚拟实例的单播流量将转发到TOR交换机，其中VXLAN将终止，并且数据包将转发到裸机服务器。
+广播：
+来自裸机服务器的广播流量由TSN节点接收。它使用复制树来泛洪虚拟网络中的广播数据包。
+来自OpenContrail集群中的虚拟实例的广播流量被发送到TSN节点，TSN节点将数据包复制到TOR。
